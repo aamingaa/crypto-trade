@@ -1081,3 +1081,419 @@ Traceback (most recent call last):
   File "uvloop/loop.pyx", line 2088, in create_connection
   File "uvloop/loop.pyx", line 2083, in uvloop.loop.Loop.create_connection
 ConnectionResetError: [Errno 54] Connection reset by peer
+2025-09-01 21:48:11,848 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 1.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:48:22,856 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 2.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:48:34,861 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 4.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:48:51,726 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 1.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:49:02,736 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 2.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:49:51,097 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 1.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:50:02,106 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 2.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:50:14,111 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 4.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:50:28,118 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 8.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:56:18,801 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 1.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:56:29,808 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 2.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:56:41,815 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 4.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:56:55,821 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 8.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:57:13,827 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 16.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:57:39,834 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 32.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
+2025-09-01 21:58:21,840 : ERROR : BINANCE_FUTURES.ws.1: encountered an exception, reconnecting in 64.0 seconds
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 654, in __await_impl__
+    _transport, protocol = await self._create_connection()
+  File "uvloop/loop.pyx", line 2033, in create_connection
+  File "uvloop/loop.pyx", line 2020, in uvloop.loop.Loop.create_connection
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection_handler.py", line 59, in _create_connection
+    async with self.conn.connect() as connection:
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/contextlib.py", line 171, in __aenter__
+    return await self.gen.__anext__()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 104, in connect
+    await self._open()
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/cryptofeed/connection.py", line 318, in _open
+    self.conn = await websockets.connect(self.address, **self.ws_kwargs)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/legacy/client.py", line 676, in __await_impl__
+    raise SecurityError("too many redirects")
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 181, in __aexit__
+    self._do_exit(exc_type)
+  File "/Users/aming/anaconda3/envs/quant/lib/python3.8/site-packages/websockets/asyncio/async_timeout.py", line 268, in _do_exit
+    raise asyncio.TimeoutError
+asyncio.exceptions.TimeoutError
