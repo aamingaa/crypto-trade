@@ -8,7 +8,11 @@ from scipy.stats import linregress
 def preprocess_data(df):
     """数据预处理：转换时间格式并计算近似成交额"""
     df['time'] = pd.to_datetime(df['timestamp'], unit='us')  # 转换时间戳
-    df = df.sort_values('time').reset_index(drop=True)
+    df = df.sort_values('time').set_index('time', drop=True)
+    selected_columns = ['symbol','asks[0].price', 'asks[0].amount', 'bids[0].price', 'bids[0].amount', 'asks[1].price', 'asks[1].amount', 'bids[1].price', 'bids[1].amount', 'asks[2].price', 'asks[2].amount', 'bids[2].price', 'bids[2].amount', 'asks[3].price', 'asks[3].amount', 'bids[3].price', 'bids[3].amount', 'asks[4].price', 'asks[4].amount', 'bids[4].price', 'bids[4].amount']
+    df = df.loc[:, selected_columns]
+    
+    df.columns = ['symbol','ap0', 'av0', 'bp0', 'bv0', 'ap1', 'av1', 'bp1', 'bv1', 'ap2', 'av2', 'bp2', 'bv2', 'ap3', 'av3', 'bp3', 'bv3', 'ap4', 'av4', 'bp4', 'bv4']
     
     # 计算中间价（用于近似成交价格）
     df['mid_price'] = (df['ap0'] + df['bp0']) / 2
@@ -89,8 +93,8 @@ def calculate_liquidity_factors(bar_data):
     
     # 3. Bar内流动性突变频率（基于bar内5分钟子窗口）
     # 按5分钟分割当前bar（若bar时长超过5分钟）
-    bar_start = bar_data['time'].min()
-    bar_end = bar_data['time'].max()
+    bar_start = bar_data.index.min()
+    bar_end = bar_data.index.max()
     sub_windows = pd.date_range(start=bar_start, end=bar_end, freq='5T')
     
     if len(sub_windows) < 2:
@@ -270,8 +274,36 @@ def compute_all_factors(raw_df, dollar_threshold=1_000_000):
     
     return pd.DataFrame(bar_factors).set_index('bar_id')
 
+from datetime import datetime, timedelta
+def generate_date_range(start_date, end_date):    
+    start = datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.strptime(end_date, '%Y-%m-%d')
+    
+    date_list = []
+    current = start
+    while current <= end:
+        date_list.append(current.strftime('%Y-%m-%d'))
+        current += timedelta(days=1)
+    return date_list
+
 # 使用示例（假设raw_df为原始数据）：
-raw_df = pd.read_csv('/Volumes/Ext-Disk/data/futures/um/tardis/orderbook/ETHUSDT/binance_book_snapshot_5_2019-12-01_ETHUSDT.csv.gz')
-# raw_df = pd.read_csv('order_book_data.csv')  # 读取你的毫秒级订单簿数据
+# '2019-12-01'
+date_list = generate_date_range('2025-01-01', '2025-01-02')
+# print(date_list)
+raw_df = []
+for date in date_list:
+    raw_df.append(pd.read_csv(f'/Volumes/Ext-Disk/data/futures/um/tardis/orderbook/ETHUSDT/binance_book_snapshot_5_{date}_ETHUSDT.csv.gz'))
+
+raw_df = pd.concat(raw_df)
+# print(raw_df.head())
+# print(raw_df.tail())
+
 factors_df = compute_all_factors(raw_df)
 print(factors_df.head())  # 查看前5小时的因子结果
+
+
+
+# raw_df = pd.read_csv('/Volumes/Ext-Disk/data/futures/um/tardis/orderbook/ETHUSDT/binance_book_snapshot_5_2019-12-01_ETHUSDT.csv.gz')
+# # raw_df = pd.read_csv('order_book_data.csv')  # 读取你的毫秒级订单簿数据
+# factors_df = compute_all_factors(raw_df)
+# print(factors_df.head())  # 查看前5小时的因子结果
