@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional
+from datetime import datetime, timedelta
+
+
 def add_rolling_derivatives(
     X: pd.DataFrame,
     windows: List[int],
@@ -348,11 +351,30 @@ __all__ = [
     'make_dataset',
 ]
 
+def generate_date_range(start_date, end_date):    
+    start = datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.strptime(end_date, '%Y-%m-%d')
+    
+    date_list = []
+    current = start
+    while current <= end:
+        date_list.append(current.strftime('%Y-%m-%d'))
+        current += timedelta(days=1)
+    return date_list
+
+
 
 if __name__ == '__main__':
     # 最小用法示例（需用户提供 trades_df 和 lob_df DataFrame）
     # 假设两者 time 均为整型时间戳，可被 _ensure_datetime 自动识别
     # 这里放一个简单的占位示例，确保模块可直接运行不报错
-    print('dollarbar_fusion module ready.')
+    # print('dollarbar_fusion module ready.')
+    date_list = generate_date_range('2025-01-01', '2025-01-02')
+    raw_df = []
+    for date in date_list:
+        raw_df.append(pd.read_csv(f'/Volumes/Ext-Disk/data/futures/um/daily/trades/ETHUSDT/ETHUSDT-trades-{date}.zip'))
+        
+    dollar_bar = build_dollar_bars(raw_df, 10000 * 3000)
+    print(dollar_bar)
 
 
