@@ -1,6 +1,47 @@
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional
+def add_rolling_derivatives(
+    X: pd.DataFrame,
+    windows: List[int],
+    stats: List[str],
+) -> pd.DataFrame:
+    """
+    在 bar 级特征表上添加 N 根窗口的滚动派生特征。
+
+    - windows: 例如 [3, 5, 10]
+    - stats: 支持 'mean', 'sum', 'std', 'min', 'max', 'median', 'q90'
+    注意：对以 "_lag" 结尾的列会跳过，避免重复放大维度。
+    """
+    X = X.copy()
+    X = X.sort_index()
+
+    base_cols = [c for c in X.columns if not c.endswith('_lag1') and not c.endswith('_lag2')]
+
+    for w in windows:
+        roll = X[base_cols].rolling(window=w, min_periods=w)
+        for stat in stats:
+            if stat == 'mean':
+                tmp = roll.mean()
+            elif stat == 'sum':
+                tmp = roll.sum()
+            elif stat == 'std':
+                tmp = roll.std()
+            elif stat == 'min':
+                tmp = roll.min()
+            elif stat == 'max':
+                tmp = roll.max()
+            elif stat == 'median':
+                tmp = roll.median()
+            elif stat == 'q90':
+                tmp = roll.quantile(0.9)
+            else:
+                continue
+
+            tmp.columns = [f'{c}_roll{w}_{stat}' for c in tmp.columns]
+            X = X.join(tmp)
+
+    return X
 
 
 def _ensure_datetime(series: pd.Series) -> pd.Series:
@@ -45,88 +86,38 @@ def build_dollar_bars(
     # is_buyer_maker == True 表示成交对手是做市买方 ⇒ 主动方为卖
     df['trade_sign'] = np.where(df['is_buyer_maker'], -1, 1)
 
-    # 累计成交额切 bar
-    cum_quote = 0.0
-    current_bar_id = 0
-    bar_ids: List[int] = []
-    bar_starts: List[pd.Timestamp] = []
-    bar_ends: List[pd.Timestamp] = []
-    bar_open: List[float] = []
-    bar_high: List[float] = []
-    bar_low: List[float] = []
-    bar_close: List[float] = []
-    bar_volume: List[float] = []
-    bar_quote: List[float] = []
-    bar_buy_volume: List[float] = []
-    bar_sell_volume: List[float] = []
+    # 向量化：使用“前缀和（移位前）”来决定 bar_id，确保阈值触发的那一笔属于上一根 bar
+    cum_prev = df['quote_qty'].cumsum().shift(1).fillna(0.0)
+    df['bar_id'] = (cum_prev // dollar_threshold).astype(int)
 
-    # 当前 bar 的累计
-    start_idx = 0
-    acc_volume = 0.0
-    acc_quote = 0.0
-    acc_buy = 0.0
-    acc_sell = 0.0
+    # 预计算买/卖量
+    df['buy_qty'] = df['qty'].where(df['trade_sign'] > 0, 0.0)
+    df['sell_qty'] = df['qty'].where(df['trade_sign'] < 0, 0.0)
 
-    for i, row in df.iterrows():
-        price = float(row['price'])
-        qty = float(row['qty'])
-        q = float(row['quote_qty'])
-        sign = int(row['trade_sign'])
-        cum_quote += q
-        acc_volume += qty
-        acc_quote += q
-        if sign > 0:
-            acc_buy += qty
-        else:
-            acc_sell += qty
+    # 分组一次性聚合 OHLC/成交量/金额/买卖量
+    agg = {
+        'time': ['first', 'last'],
+        'price': ['first', 'max', 'min', 'last'],
+        'qty': 'sum',
+        'quote_qty': 'sum',
+        'buy_qty': 'sum',
+        'sell_qty': 'sum',
+    }
+    g = df.groupby('bar_id', sort=True).agg(agg)
 
-        # 初始化 open/high/low
-        if i == start_idx:
-            o = price
-            h = price
-            l = price
-        else:
-            o = bar_open[-1] if bar_open else price
-            h = max(bar_high[-1], price) if bar_high else price
-            l = min(bar_low[-1], price) if bar_low else price
+    # 展平多级列
+    g.columns = [
+        'start_time', 'end_time',
+        'open', 'high', 'low', 'close',
+        'volume', 'dollar_value',
+        'buy_volume', 'sell_volume'
+    ]
 
-        # 达到阈值则切 bar（包含当前成交）
-        if cum_quote >= dollar_threshold:
-            segment = df.iloc[start_idx:i+1]
-            bar_ids.append(current_bar_id)
-            bar_starts.append(segment['time'].iloc[0])
-            bar_ends.append(segment['time'].iloc[-1])
-            bar_open.append(segment['price'].iloc[0])
-            bar_high.append(segment['price'].max())
-            bar_low.append(segment['price'].min())
-            bar_close.append(segment['price'].iloc[-1])
-            bar_volume.append(segment['qty'].sum())
-            bar_quote.append(segment['quote_qty'].sum())
-            bar_buy_volume.append((segment.loc[segment['trade_sign']>0,'qty']).sum())
-            bar_sell_volume.append((segment.loc[segment['trade_sign']<0,'qty']).sum())
+    # 仅保留达到阈值的完整 bars（过滤最后一根不完整 bar）
+    g = g[g['dollar_value'] >= dollar_threshold]
 
-            # 重置
-            cum_quote = 0.0
-            start_idx = i + 1
-            current_bar_id += 1
-            acc_volume = 0.0
-            acc_quote = 0.0
-            acc_buy = 0.0
-            acc_sell = 0.0
-
-    bars = pd.DataFrame({
-        'bar_id': bar_ids,
-        'start_time': bar_starts,
-        'end_time': bar_ends,
-        'open': bar_open,
-        'high': bar_high,
-        'low': bar_low,
-        'close': bar_close,
-        'volume': bar_volume,
-        'dollar_value': bar_quote,
-        'buy_volume': bar_buy_volume,
-        'sell_volume': bar_sell_volume,
-    })
+    # bar_id 作为列返回
+    bars = g.reset_index()
     return bars
 
 
@@ -291,6 +282,8 @@ def make_dataset(
     horizon_n: int,
     add_lags: int = 2,
     use_interactions: bool = True,
+    rolling_windows: Optional[List[int]] = None,
+    rolling_stats: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """
     生成训练集：在 dollar bar 轴上融合交易与订单簿特征，并构造 N-bar 标签。
@@ -323,6 +316,14 @@ def make_dataset(
     for k in range(1, add_lags + 1):
         for col in list(X.columns):
             X[f'{col}_lag{k}'] = X[col].shift(k)
+
+    # 滚动派生特征
+    if rolling_windows:
+        X = add_rolling_derivatives(
+            X,
+            windows=rolling_windows,
+            stats=rolling_stats or ['mean', 'sum'],
+        )
 
     # 标签：未来 N 根的对数收益，基于 bar 收盘价
     close = bars.set_index('bar_id')['close']
