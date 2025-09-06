@@ -8,12 +8,149 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
 
-from util.dollarbar_fusion import (
-    build_dollar_bars,
-    aggregate_trade_features_on_bars,
-)
+# from util.dollarbar_fusion import (
+#     build_dollar_bars,
+#     aggregate_trade_features_on_bars,
+# )
 
+def _ensure_datetime(series: pd.Series) -> pd.Series:
+    # 若已是datetime类型，直接返回
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
+    
+    # 安全转换为数值类型（非数值转为NaN，避免astype直接报错）
+    s = pd.to_numeric(series, errors='coerce')
+    
+    # 检查是否存在无法转换的非数值
+    if s.isna().any():
+        warnings.warn("序列中包含无法转换为数值的元素，已自动转为NaT")
+    
+    # 避免空序列导致的判断错误
+    if s.empty:
+        return pd.Series([], dtype='datetime64[ns]')
+    
+    # 基于2025年前后的合理时间戳范围设置阈值（单位：对应单位的数量）
+    # 参考：2025年的时间戳约为 1.7e9秒 ≈ 1.7e12毫秒 ≈ 1.7e15微秒 ≈ 1.7e18纳秒
+    ns_threshold = 1e17  # 纳秒级阈值（约317年，覆盖合理时间范围）
+    us_threshold = 1e14  # 微秒级阈值（约317年）
+    ms_threshold = 1e11  # 毫秒级阈值（约317年）
+    s_abs = s.abs()  # 用绝对值判断量级，保留原始符号用于转换（支持负时间戳）
+    
+    # 按any()逻辑判断单位（只要有一个元素满足阈值就用对应单位）
+    if (s_abs > ns_threshold).any():
+        return pd.to_datetime(s, unit='ns', errors='coerce')
+    elif (s_abs > us_threshold).any():
+        return pd.to_datetime(s, unit='us', errors='coerce')
+    elif (s_abs > ms_threshold).any():
+        return pd.to_datetime(s, unit='ms', errors='coerce')
+    else:
+        return pd.to_datetime(s, unit='s', errors='coerce')
 
+def generate_dollar_bars(trades_df, target_hour=1):
+    """生成近似目标小时级的Dollar Bar"""
+    # 计算小时级平均成交额作为阈值
+    hourly_volume = trades_df.resample(f'{target_hour}H', on='trade_time')['dollar_amount'].sum()
+    dollar_threshold = hourly_volume.mean()  # 阈值=目标小时级平均成交额
+    
+    # 生成Bar
+    trades_df['cum_dollar'] = trades_df['dollar_amount'].cumsum()
+    trades_df['bar_id'] = (trades_df['cum_dollar'] // dollar_threshold).astype(int)
+    
+    # 过滤不完整的最后一个Bar
+    last_valid_id = trades_df['bar_id'].max() - 1
+    trades_df = trades_df[trades_df['bar_id'] <= last_valid_id]
+    
+    # 提取每个Bar的时间区间和基础统计量
+    bar_info = trades_df.groupby('bar_id').agg(
+        start_time=('trade_time', 'min'),
+        end_time=('trade_time', 'max'),
+        total_dollar=('dollar_amount', 'sum'),
+        price_open=('price', 'first'),
+        price_close=('price', 'last'),
+        price_high=('price', 'max'),
+        price_low=('price', 'min'),
+        trade_count=('price', 'count')
+    ).reset_index()
+    
+    # 计算Bar的未来收益（预测目标：下一个Bar的涨跌幅）
+    bar_info['future_return'] = (bar_info['price_close'].shift(-1) - bar_info['price_close']) / bar_info['price_close'] * 100
+    
+    return trades_df, bar_info, dollar_threshold
+
+def build_dollar_bars(
+    trades: pd.DataFrame,
+    dollar_threshold: float,
+) -> pd.DataFrame:
+    """
+    生成dollar bars，确保bar_id连续递增。
+    
+    改进点：
+    1. 重构bar_id计算逻辑，通过跟踪累积成交额确保连续
+    2. 避免因单笔大额交易导致的bar_id跳跃
+    3. 仅过滤最后一个不完整的bar（若存在）
+    """
+    trades['time'] = _ensure_datetime(trades['time'])
+    trades = trades.sort_values('time').reset_index(drop=True)
+    df = trades.copy()
+    # 处理时间列和排序
+    # df['time'] = _ensure_datetime(df['time'])
+    # df = df.sort_values('time').reset_index(drop=True)
+    
+    # 计算成交额（quote_qty）
+    if 'quote_qty' not in df.columns or df['quote_qty'].isna().all():
+        df['quote_qty'] = df['price'] * df['qty']
+    
+    # 标记交易方向
+    df['trade_sign'] = np.where(df['is_buyer_maker'], -1, 1)
+    df['buy_qty'] = df['qty'].where(df['trade_sign'] > 0, 0.0)
+    df['sell_qty'] = df['qty'].where(df['trade_sign'] < 0, 0.0)
+    
+    # 核心改进：逐笔计算bar_id，确保连续递增
+    cumulative = 0.0  # 累积成交额
+    bar_id = 0        # 当前bar_id
+    bar_ids = []      # 存储每个交易的bar_id
+    
+    for qty in df['quote_qty']:
+        cumulative += qty
+        # 当累积成交额达到阈值时，当前交易仍属于当前bar_id，随后bar_id递增并重置累积
+        if cumulative >= dollar_threshold:
+            bar_ids.append(bar_id)
+            # 重置累积（保留超额部分，用于下一个bar的计算）
+            cumulative -= dollar_threshold
+            bar_id += 1
+        else:
+            bar_ids.append(bar_id)
+    
+    df['bar_id'] = bar_ids
+    
+    # 分组聚合
+    agg = {
+        'time': ['first', 'last'],
+        'price': ['first', 'max', 'min', 'last'],
+        'qty': 'sum',
+        'quote_qty': 'sum',
+        'buy_qty': 'sum',
+        'sell_qty': 'sum',
+    }
+    g = df.groupby('bar_id', sort=True).agg(agg)
+    
+    # 展平列名
+    g.columns = [
+        'start_time', 'end_time',
+        'open', 'high', 'low', 'close',
+        'volume', 'dollar_value',
+        'buy_volume', 'sell_volume'
+    ]
+    
+    # 仅过滤最后一个可能不完整的bar（若其成交额不足阈值）
+    if not g.empty and g.iloc[-1]['dollar_value'] < dollar_threshold:
+        g = g.iloc[:-1]
+    
+    # 重置bar_id为连续整数（避免因过滤最后一个bar导致的断档）
+    g = g.reset_index(drop=True)
+    g['bar_id'] = g.index
+    
+    return g
  
 
 
@@ -202,7 +339,8 @@ def make_barlevel_dataset(
         return pd.DataFrame(), pd.Series(dtype=float), bars, pd.DataFrame()
 
     # 2) Bar级特征（逐笔交易侧）
-    bar_feat = aggregate_trade_features_on_bars(trades, bars)
+    bar_feat = []
+    # bar_feat = aggregate_trade_features_on_bars(trades, bars)
 
     # 3) 标签：未来 N 根 bar 的对数收益
     close = bar_feat['close'] if 'close' in bar_feat.columns else bars.set_index('bar_id')['close']
@@ -426,8 +564,9 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     每个特征由独立函数实现并组合返回。
     """
     df = trades.copy()
-    if not pd.api.types.is_datetime64_any_dtype(df['time']):
-        df['time'] = pd.to_datetime(df['time'])
+    # if not pd.api.types.is_datetime64_any_dtype(df['time']):
+    #     df['time'] = pd.to_datetime(df['time'])
+    df['time'] = _ensure_datetime(df['time'])
     df = df.sort_values('time')
     if 'quote_qty' not in df.columns or df['quote_qty'].isna().all():
         df['quote_qty'] = df['price'] * df['qty']
@@ -436,10 +575,10 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
 
     out = {}
     out.update(_factor_int_trade_stats(seg, start_ts, end_ts))
-    out.update(_factor_order_flow_imbalance(seg))
-    out.update(_factor_garman_order_flow(seg))
-    out.update(_factor_rolling_ofi(seg))
-    out.update(_factor_activity_and_persistence(seg))
+    # out.update(_factor_order_flow_imbalance(seg))
+    # out.update(_factor_garman_order_flow(seg))
+    # out.update(_factor_rolling_ofi(seg))
+    # out.update(_factor_activity_and_persistence(seg))
     return out
 
 
@@ -471,6 +610,7 @@ def make_interval_feature_dataset(
 
     # 计算每个样本的区间
     features = []
+    idx = 1
     for bar_id in close_s.index:
         if window_mode == 'past':
             start_idx = bar_id - feature_window_bars
@@ -484,10 +624,12 @@ def make_interval_feature_dataset(
             if end_idx >= len(bars):
                 features.append({'bar_id': bar_id, '_skip': True})
                 continue
-
+                
         start_ts = bars.loc[start_idx, 'start_time']
         end_ts = bars.loc[end_idx, 'end_time']
         feat = _compute_interval_trade_features(trades, start_ts, end_ts)
+        print(idx)
+        idx = idx + 1
         feat['bar_id'] = bar_id
         feat['interval_start'] = start_ts
         feat['interval_end'] = end_ts
