@@ -559,6 +559,260 @@ def _factor_activity_and_persistence(seg: pd.DataFrame) -> Dict[str, float]:
     }
 
 
+def _factor_realized_variance(seg: pd.DataFrame) -> Dict[str, float]:
+    if seg.empty:
+        return {'rv': np.nan}
+    p = seg.sort_values('time')['price'].astype(float).to_numpy()
+    if len(p) < 2:
+        return {'rv': np.nan}
+    r = np.diff(np.log(p))
+    rv = float(np.sum(r ** 2)) if len(r) > 0 else np.nan
+    return {'rv': rv}
+
+
+def _factor_bipower_variation(seg: pd.DataFrame) -> Dict[str, float]:
+    if seg.empty:
+        return {'bpv': np.nan}
+    p = seg.sort_values('time')['price'].astype(float).to_numpy()
+    if len(p) < 3:
+        return {'bpv': np.nan}
+    r = np.diff(np.log(p))
+    if len(r) < 2:
+        return {'bpv': np.nan}
+    mu1 = np.sqrt(2.0 / np.pi)
+    bpv = float(np.sum(np.abs(r[1:]) * np.abs(r[:-1])) / (mu1 ** 2))
+    return {'bpv': bpv}
+
+
+def _factor_jump_indicator(seg: pd.DataFrame) -> Dict[str, float]:
+    if seg.empty:
+        return {'jump_rv_bpv': np.nan}
+    # 复用前两者逻辑，简单重算一次，便于独立使用
+    out_rv = _factor_realized_variance(seg)
+    out_bpv = _factor_bipower_variation(seg)
+    rv = out_rv.get('rv')
+    bpv = out_bpv.get('bpv')
+    jump = float(max(rv - bpv, 0.0)) if (pd.notna(rv) and pd.notna(bpv)) else np.nan
+    return {'jump_rv_bpv': jump}
+
+
+def _factor_hf_flip_rate(seg: pd.DataFrame) -> Dict[str, float]:
+    if seg.empty:
+        return {'hf_flip_rate': np.nan}
+    sgn = seg['trade_sign'].astype(int).to_numpy()
+    if len(sgn) < 2:
+        return {'hf_flip_rate': np.nan}
+    flips = int((np.diff(sgn) != 0).sum())
+    rate = flips / (len(sgn) - 1)
+    return {'hf_flip_rate': float(rate)}
+
+
+def _factor_mean_reversion_strength(seg: pd.DataFrame) -> Dict[str, float]:
+    if seg.empty:
+        return {'mr_rho1': np.nan, 'mr_strength': np.nan}
+    p = seg.sort_values('time')['price'].astype(float).to_numpy()
+    if len(p) < 3:
+        return {'mr_rho1': np.nan, 'mr_strength': np.nan}
+    r = np.diff(np.log(p))
+    if len(r) < 2:
+        return {'mr_rho1': np.nan, 'mr_strength': np.nan}
+    x = r[:-1] - np.mean(r[:-1])
+    y = r[1:] - np.mean(r[1:])
+    denom = np.sqrt(np.sum(x**2) * np.sum(y**2))
+    if denom == 0:
+        return {'mr_rho1': np.nan, 'mr_strength': np.nan}
+    rho1 = float(np.sum(x * y) / denom)
+    mr_strength = -rho1 if pd.notna(rho1) else np.nan
+    return {'mr_rho1': rho1, 'mr_strength': float(mr_strength) if pd.notna(mr_strength) else np.nan}
+
+
+def _factor_highlow_amplitude_ratio(seg: pd.DataFrame) -> Dict[str, float]:
+    if seg.empty:
+        return {'hl_amplitude_ratio': np.nan}
+    p = seg['price'].astype(float).to_numpy()
+    if len(p) == 0:
+        return {'hl_amplitude_ratio': np.nan}
+    hi = float(np.max(p))
+    lo = float(np.min(p))
+    mid = (hi + lo) / 2.0
+    hl_ratio = float((hi - lo) / mid) if mid != 0 else np.nan
+    return {'hl_amplitude_ratio': hl_ratio}
+
+
+def _factor_cum_signed_flow_price_corr(seg: pd.DataFrame) -> Dict[str, float]:
+    """
+    累计签名成交 与 价格路径（累积log价差）的相关性（qty口径/dollar口径）。
+    """
+    if seg.empty:
+        return {
+            'corr_cumsum_signed_qty_logp': np.nan,
+            'corr_cumsum_signed_dollar_logp': np.nan,
+        }
+    seg = seg.sort_values('time').copy()
+    p = seg['price'].astype(float).to_numpy()
+    if len(p) < 3:
+        return {
+            'corr_cumsum_signed_qty_logp': np.nan,
+            'corr_cumsum_signed_dollar_logp': np.nan,
+        }
+    logp = np.log(p)
+    logp_rel = logp - logp[0]
+    cs_qty = np.cumsum((seg['trade_sign'] * seg['qty']).astype(float).to_numpy())
+    cs_dollar = np.cumsum((seg['trade_sign'] * seg['quote_qty']).astype(float).to_numpy())
+    def _corr(a, b):
+        if len(a) != len(b) or np.std(a) == 0 or np.std(b) == 0:
+            return np.nan
+        c = np.corrcoef(a, b)[0, 1]
+        return float(c) if np.isfinite(c) else np.nan
+    return {
+        'corr_cumsum_signed_qty_logp': _corr(cs_qty, logp_rel),
+        'corr_cumsum_signed_dollar_logp': _corr(cs_dollar, logp_rel),
+    }
+
+
+def _factor_signed_vwap_deviation(seg: pd.DataFrame) -> Dict[str, float]:
+    """
+    带符号的VWAP偏离：((p_last - vwap)/vwap) * sign(∑signed_qty)
+    同时输出未加符号的偏离。
+    """
+    if seg.empty:
+        return {'signed_vwap_deviation': np.nan, 'vwap_deviation': np.nan}
+    qty_sum = float(seg['qty'].sum())
+    if qty_sum <= 0:
+        return {'signed_vwap_deviation': np.nan, 'vwap_deviation': np.nan}
+    vwap = float((seg['price'] * seg['qty']).sum() / qty_sum)
+    p_last = float(seg.sort_values('time')['price'].iloc[-1])
+    dev = (p_last - vwap) / vwap if vwap != 0 else np.nan
+    net_signed_qty = float((seg['trade_sign'] * seg['qty']).sum())
+    signed_dev = dev * (1.0 if net_signed_qty > 0 else (-1.0 if net_signed_qty < 0 else 0.0)) if pd.notna(dev) else np.nan
+    return {'signed_vwap_deviation': signed_dev, 'vwap_deviation': dev}
+
+
+def _factor_micro_price_momentum(seg: pd.DataFrame, window: int = 20) -> Dict[str, float]:
+    """
+    微价格动量：短窗Δlog价与价格Z-score（以log价格计算）。
+    window 默认20笔，若样本不足则取最大小于等于长度。
+    """
+    if seg.empty:
+        return {'micro_dp_short': np.nan, 'micro_dp_zscore': np.nan}
+    seg = seg.sort_values('time').copy()
+    p = seg['price'].astype(float).to_numpy()
+    if len(p) < 2:
+        return {'micro_dp_short': np.nan, 'micro_dp_zscore': np.nan}
+    w = int(max(2, min(window, len(p))))
+    logp = np.log(p)
+    dp_short = float(logp[-1] - logp[-w]) if len(logp) >= w else np.nan
+    win = logp[-w:]
+    mu = float(np.mean(win))
+    sd = float(np.std(win))
+    z = (float(logp[-1]) - mu) / sd if sd > 0 else np.nan
+    return {'micro_dp_short': dp_short, 'micro_dp_zscore': z}
+
+
+def _factor_arrival_rate_metrics(seg: pd.DataFrame, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Dict[str, float]:
+    """
+    到达率与间隔统计：成交笔数、平均到达率、间隔均值/方差/倒数均值。
+    """
+    duration = max(1.0, (end_ts - start_ts).total_seconds())
+    if seg.empty:
+        return {
+            'arr_trade_count': 0.0,
+            'arr_rate_per_sec': 0.0,
+            'arr_interval_mean': np.nan,
+            'arr_interval_var': np.nan,
+            'arr_interval_inv_mean': np.nan,
+        }
+    t = seg['time'].view('int64') / 1e9
+    t = np.sort(t)
+    gaps = np.diff(t)
+    arr_rate = len(seg) / duration
+    interval_mean = float(np.mean(gaps)) if len(gaps) else np.nan
+    interval_var = float(np.var(gaps)) if len(gaps) else np.nan
+    inv_mean = float(np.mean(1.0 / gaps)) if len(gaps) and np.all(gaps > 0) else np.nan
+    return {
+        'arr_trade_count': float(len(seg)),
+        'arr_rate_per_sec': float(arr_rate),
+        'arr_interval_mean': interval_mean,
+        'arr_interval_var': interval_var,
+        'arr_interval_inv_mean': inv_mean,
+    }
+
+
+def _factor_hawkes_like_clustering(seg: pd.DataFrame, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Dict[str, float]:
+    """
+    自激励近似：短窗内聚簇度。
+    做法：将间隔小于阈值 tau 视为同一簇；输出簇数、平均簇大小、最大簇大小、聚簇度=平均簇大小/总数。
+    tau 取区间内间隔中位数或固定阈值最小值。
+    """
+    duration = max(1.0, (end_ts - start_ts).total_seconds())
+    if seg.empty:
+        return {
+            'hawkes_cluster_count': 0.0,
+            'hawkes_cluster_size_mean': np.nan,
+            'hawkes_cluster_size_max': 0.0,
+            'hawkes_clustering_degree': np.nan,
+        }
+    t = np.sort(seg['time'].view('int64') / 1e9)
+    gaps = np.diff(t)
+    if len(gaps) == 0:
+        return {
+            'hawkes_cluster_count': 1.0,
+            'hawkes_cluster_size_mean': float(len(seg)),
+            'hawkes_cluster_size_max': float(len(seg)),
+            'hawkes_clustering_degree': 1.0,
+        }
+    tau = float(np.nanmedian(gaps)) if np.isfinite(np.nanmedian(gaps)) else 0.0
+    tau = max(tau, 0.001)
+    clusters = []
+    cur_size = 1
+    for g in gaps:
+        if g <= tau:
+            cur_size += 1
+        else:
+            clusters.append(cur_size)
+            cur_size = 1
+    clusters.append(cur_size)
+    cluster_count = len(clusters)
+    size_mean = float(np.mean(clusters)) if clusters else np.nan
+    size_max = float(np.max(clusters)) if clusters else 0.0
+    clustering_degree = size_mean / float(len(seg)) if clusters else np.nan
+    return {
+        'hawkes_cluster_count': float(cluster_count),
+        'hawkes_cluster_size_mean': size_mean,
+        'hawkes_cluster_size_max': size_max,
+        'hawkes_clustering_degree': float(clustering_degree) if pd.notna(clustering_degree) else np.nan,
+    }
+
+
+def _factor_large_trade_tail_share(seg: pd.DataFrame, q: float = 0.9) -> Dict[str, float]:
+    """
+    大单占比/尾部比例：成交额 > 分位阈值(如90%) 的金额占区间总成交额比例；
+    同时输出大单笔数占比与均值（便于诊断）。
+    """
+    if seg.empty:
+        return {
+            'large_tail_dollar_share': np.nan,
+            'large_tail_trade_share': np.nan,
+            'large_tail_dollar_mean': np.nan,
+        }
+    dv = seg['quote_qty'].astype(float)
+    thr = float(np.quantile(dv, q)) if len(dv) > 0 else np.nan
+    if not np.isfinite(thr) or thr <= 0:
+        return {
+            'large_tail_dollar_share': np.nan,
+            'large_tail_trade_share': np.nan,
+            'large_tail_dollar_mean': np.nan,
+        }
+    mask = dv >= thr
+    share_dollar = float(dv[mask].sum() / dv.sum()) if dv.sum() > 0 else np.nan
+    share_trade = float(mask.mean())
+    mean_large = float(dv[mask].mean()) if mask.any() else np.nan
+    return {
+        'large_tail_dollar_share': share_dollar,
+        'large_tail_trade_share': share_trade,
+        'large_tail_dollar_mean': mean_large,
+    }
+
 def _factor_price_impact_kyle(seg: pd.DataFrame) -> Dict[str, float]:
     """
     Kyle λ：回归 Δlog(price) 对 签名成交额（quote_qty * sign）。
@@ -683,6 +937,21 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     out.update(_factor_price_impact_hasbrouck(seg))
     out.update(_factor_price_impact_halflife(seg))
     out.update(_factor_price_impact_decomposition(seg))
+    # 波动与噪声（拆分为独立函数）
+    out.update(_factor_realized_variance(seg))
+    out.update(_factor_bipower_variation(seg))
+    out.update(_factor_jump_indicator(seg))
+    out.update(_factor_hf_flip_rate(seg))
+    out.update(_factor_mean_reversion_strength(seg))
+    out.update(_factor_highlow_amplitude_ratio(seg))
+    # 成交节奏与聚簇
+    out.update(_factor_arrival_rate_metrics(seg, start_ts, end_ts))
+    out.update(_factor_hawkes_like_clustering(seg, start_ts, end_ts))
+    out.update(_factor_large_trade_tail_share(seg))
+        # 价格路径形状
+    out.update(_factor_cum_signed_flow_price_corr(seg))
+    out.update(_factor_signed_vwap_deviation(seg))
+    out.update(_factor_micro_price_momentum(seg))
     return out
 
 
