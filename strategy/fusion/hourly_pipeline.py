@@ -232,11 +232,11 @@ def _time_splits_purged(
         test_start = test_times.min()
         test_end = test_times.max()
 
-        left_block = (idx <= (test_start + embargo_td))
-        right_block = (idx >= (test_end - embargo_td))
-        exclude = left_block | right_block | test_mask
+        left_block  = (idx >= (test_start - embargo_td)) & (idx <  test_start)
+        right_block = (idx >  test_end)                  & (idx <= (test_end + embargo_td))
+        exclude = left_block | right_block | test_mask   # 再加上测试集本身
         train_idx = idx[~exclude]
-        test_idx = idx[test_mask]
+        test_idx  = idx[test_mask]
         if len(train_idx) == 0 or len(test_idx) == 0:
             continue
         out.append((train_idx, test_idx))
@@ -250,6 +250,10 @@ def purged_cv_evaluate(
     embargo: str = '1H',
     model_type: str = 'ridge',
     random_state: int = 42,
+    fee_rate: float = 1e-4,
+    annualize: bool = True,
+    period_seconds: Optional[float] = None,
+    seconds_per_year: float = 365.0 * 24.0 * 3600.0,
 ) -> Dict:
     """
     使用 Purged 时间序列 CV 进行回归评估，返回按折与汇总的指标。
@@ -275,6 +279,10 @@ def purged_cv_evaluate(
         Xtr, ytr = X.loc[tr_idx], y.loc[tr_idx]
         Xte, yte = X.loc[te_idx], y.loc[te_idx]
 
+        Xtr.drop(columns=['interval_start', 'interval_end'], inplace=True)
+        Xte.drop(columns=['interval_start', 'interval_end'], inplace=True)
+        ytr.drop(columns=['end_time'], inplace=True)
+        yte.drop(columns=['end_time'], inplace=True)
         if use_scaler:
             scaler = StandardScaler()
             Xtr_scaled = pd.DataFrame(
@@ -291,17 +299,40 @@ def purged_cv_evaluate(
         yhat = pd.Series(model.predict(Xte_scaled), index=te_idx)
         preds_all.loc[te_idx] = yhat
 
-        # 指标
+        # 预测与误差指标
         pearson_ic = yhat.corr(yte)
         spearman_ic = yhat.corr(yte, method='spearman')
         rmse = mean_squared_error(yte, yhat) ** 0.5
         dir_acc = (np.sign(yhat) == np.sign(yte)).mean()
+
+        # 简单交易指标（方向持仓，含手续费）
+        pos = np.sign(yhat).fillna(0.0)
+        ret_gross = (pos * yte).astype(float)
+        turnover = pos.diff().abs().fillna(np.abs(pos.iloc[0]))
+        ret_net = ret_gross - fee_rate * turnover
+        sharpe_net = float(ret_net.mean() / ret_net.std()) if ret_net.std() > 0 else np.nan
+        if annualize and pd.notna(sharpe_net):
+            ps = float(period_seconds) if (period_seconds is not None and period_seconds > 0) else np.nan
+            if np.isfinite(ps) and ps > 0:
+                ann_factor = np.sqrt(seconds_per_year / ps)
+                sharpe_net_ann = float(sharpe_net * ann_factor)
+            else:
+                sharpe_net_ann = np.nan
+        else:
+            sharpe_net_ann = np.nan
+
         by_fold.append({
             'fold': fold_id,
             'pearson_ic': float(pearson_ic),
             'spearman_ic': float(spearman_ic),
             'rmse': float(rmse),
             'dir_acc': float(dir_acc),
+            'ret_gross_mean': float(ret_gross.mean()),
+            'ret_net_mean': float(ret_net.mean()),
+            'ret_net_std': float(ret_net.std()) if ret_net.std() > 0 else np.nan,
+            'sharpe_net': sharpe_net,
+            'sharpe_net_ann': sharpe_net_ann,
+            'fee_rate': float(fee_rate),
             'n_train': int(len(Xtr)),
             'n_test': int(len(Xte)),
         })
@@ -313,6 +344,10 @@ def purged_cv_evaluate(
         'spearman_ic_mean': float(df_folds['spearman_ic'].mean()) if not df_folds.empty else np.nan,
         'rmse_mean': float(df_folds['rmse'].mean()) if not df_folds.empty else np.nan,
         'dir_acc_mean': float(df_folds['dir_acc'].mean()) if not df_folds.empty else np.nan,
+        'ret_gross_mean_mean': float(df_folds['ret_gross_mean'].mean()) if 'ret_gross_mean' in df_folds else np.nan,
+        'ret_net_mean_mean': float(df_folds['ret_net_mean'].mean()) if 'ret_net_mean' in df_folds else np.nan,
+        'sharpe_net_mean': float(df_folds['sharpe_net'].mean()) if 'sharpe_net' in df_folds else np.nan,
+        'sharpe_net_ann_mean': float(df_folds['sharpe_net_ann'].mean()) if 'sharpe_net_ann' in df_folds else np.nan,
         'n_splits_effective': int(len(df_folds)),
     }
     return {
@@ -1051,6 +1086,10 @@ def run_bar_interval_pipeline(
         horizon_bars=horizon_bars,
         window_mode=window_mode,
     )
+    
+    mask = y.notna() & np.isfinite(y.values)
+    X = X.loc[mask].replace([np.inf, -np.inf], np.nan).dropna()
+    y = y.loc[X.index]
 
     if X.empty or y.empty:
         return {'error': '数据不足或阈值设置过大，无法构造区间数据集', 'X': X, 'y': y, 'bars': bars}
@@ -1073,6 +1112,13 @@ def run_bar_interval_pipeline(
     else:
         embargo_td = auto_embargo_td
 
+    # 传入期长：使用 dollar bar 的中位秒数，便于年化换算
+    # 单期收益对应的是 horizon_bars 根 bar 的窗口
+    period_seconds = (
+        float(median_duration.total_seconds() * max(1, horizon_bars))
+        if median_duration is not None
+        else None
+    )
     eval_result = purged_cv_evaluate(
         X=X2,
         y=y2,
@@ -1080,6 +1126,7 @@ def run_bar_interval_pipeline(
         embargo=embargo_td,
         model_type=model_type,
         random_state=random_state,
+        period_seconds=period_seconds,
     )
 
     return {'eval': eval_result, 'X': X, 'y': y, 'bars': bars}
@@ -1118,7 +1165,7 @@ def main():
     trades_df = pd.concat(raw_df, ignore_index=True)
     res = run_bar_interval_pipeline(
         trades=trades_df,
-        dollar_threshold=10000 * 2000,
+        dollar_threshold=10000 * 6000,
         feature_window_bars=10,
         horizon_bars=3,
         window_mode='past',
