@@ -931,27 +931,27 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     # out.update(_factor_garman_order_flow(seg))
     # out.update(_factor_rolling_ofi(seg))
     # out.update(_factor_activity_and_persistence(seg))
-    # 价格冲击/流动性代理
-    out.update(_factor_price_impact_kyle(seg))
-    out.update(_factor_price_impact_amihud(seg))
-    out.update(_factor_price_impact_hasbrouck(seg))
-    out.update(_factor_price_impact_halflife(seg))
-    out.update(_factor_price_impact_decomposition(seg))
-    # 波动与噪声（拆分为独立函数）
-    out.update(_factor_realized_variance(seg))
-    out.update(_factor_bipower_variation(seg))
-    out.update(_factor_jump_indicator(seg))
-    out.update(_factor_hf_flip_rate(seg))
-    out.update(_factor_mean_reversion_strength(seg))
-    out.update(_factor_highlow_amplitude_ratio(seg))
-    # 成交节奏与聚簇
-    out.update(_factor_arrival_rate_metrics(seg, start_ts, end_ts))
-    out.update(_factor_hawkes_like_clustering(seg, start_ts, end_ts))
-    out.update(_factor_large_trade_tail_share(seg))
-        # 价格路径形状
-    out.update(_factor_cum_signed_flow_price_corr(seg))
-    out.update(_factor_signed_vwap_deviation(seg))
-    out.update(_factor_micro_price_momentum(seg))
+    # # 价格冲击/流动性代理
+    # out.update(_factor_price_impact_kyle(seg))
+    # out.update(_factor_price_impact_amihud(seg))
+    # out.update(_factor_price_impact_hasbrouck(seg))
+    # out.update(_factor_price_impact_halflife(seg))
+    # out.update(_factor_price_impact_decomposition(seg))
+    # # 波动与噪声（拆分为独立函数）
+    # out.update(_factor_realized_variance(seg))
+    # out.update(_factor_bipower_variation(seg))
+    # out.update(_factor_jump_indicator(seg))
+    # out.update(_factor_hf_flip_rate(seg))
+    # out.update(_factor_mean_reversion_strength(seg))
+    # out.update(_factor_highlow_amplitude_ratio(seg))
+    # # 成交节奏与聚簇
+    # out.update(_factor_arrival_rate_metrics(seg, start_ts, end_ts))
+    # out.update(_factor_hawkes_like_clustering(seg, start_ts, end_ts))
+    # out.update(_factor_large_trade_tail_share(seg))
+    #     # 价格路径形状
+    # out.update(_factor_cum_signed_flow_price_corr(seg))
+    # out.update(_factor_signed_vwap_deviation(seg))
+    # out.update(_factor_micro_price_momentum(seg))
     return out
 
 
