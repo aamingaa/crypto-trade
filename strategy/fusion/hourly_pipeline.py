@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
+import warnings
 
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
@@ -558,6 +559,101 @@ def _factor_activity_and_persistence(seg: pd.DataFrame) -> Dict[str, float]:
     }
 
 
+def _factor_price_impact_kyle(seg: pd.DataFrame) -> Dict[str, float]:
+    """
+    Kyle λ：回归 Δlog(price) 对 签名成交额（quote_qty * sign）。
+    以协方差/方差比值近似斜率。
+    """
+    if len(seg) < 3:
+        return {'kyle_lambda': np.nan}
+    seg = seg.sort_values('time').copy()
+    seg['logp'] = np.log(seg['price'])
+    seg['ret'] = seg['logp'].diff()
+    seg['signed_dollar'] = seg['quote_qty'].astype(float) * seg['trade_sign'].astype(float)
+    x = seg['signed_dollar'].to_numpy()[1:]
+    y = seg['ret'].to_numpy()[1:]
+    if len(x) < 2 or np.var(x) <= 0:
+        return {'kyle_lambda': np.nan}
+    covxy = np.cov(x, y, ddof=1)[0, 1]
+    lam = covxy / np.var(x)
+    return {'kyle_lambda': float(lam) if np.isfinite(lam) else np.nan}
+
+
+def _factor_price_impact_amihud(seg: pd.DataFrame) -> Dict[str, float]:
+    """
+    Amihud λ：平均 |Δlog(price)| / 成交额（逐笔近似）。
+    """
+    if len(seg) < 2:
+        return {'amihud_lambda': np.nan}
+    seg = seg.sort_values('time').copy()
+    seg['logp'] = np.log(seg['price'])
+    ret_abs = seg['logp'].diff().abs()
+    denom = seg['quote_qty'].replace(0, np.nan).astype(float)
+    ratio = (ret_abs / denom).iloc[1:]
+    val = ratio.mean()
+    return {'amihud_lambda': float(val) if pd.notna(val) else np.nan}
+
+
+def _factor_price_impact_hasbrouck(seg: pd.DataFrame) -> Dict[str, float]:
+    """
+    Hasbrouck（简化）：回归 Δlog(price) 对 trade_sign * sqrt(dollar)。
+    用协方差/方差近似斜率。
+    """
+    if len(seg) < 3:
+        return {'hasbrouck_lambda': np.nan}
+    seg = seg.sort_values('time').copy()
+    seg['logp'] = np.log(seg['price'])
+    ret = seg['logp'].diff().to_numpy()[1:]
+    x = (seg['trade_sign'].astype(float) * np.sqrt(seg['quote_qty'].astype(float))).to_numpy()[1:]
+    if len(x) < 2 or np.var(x) <= 0:
+        return {'hasbrouck_lambda': np.nan}
+    covxy = np.cov(x, ret, ddof=1)[0, 1]
+    lam = covxy / np.var(x)
+    return {'hasbrouck_lambda': float(lam) if np.isfinite(lam) else np.nan}
+
+
+def _factor_price_impact_halflife(seg: pd.DataFrame) -> Dict[str, float]:
+    """
+    冲击半衰期（近似）：基于区间内 Δlog(price) 的一阶自相关 ρ，
+    t_half = ln(2) / -ln(ρ)，仅在 0<ρ<1 时定义。
+    """
+    if len(seg) < 3:
+        return {'impact_half_life': np.nan}
+    seg = seg.sort_values('time').copy()
+    r = seg['price'].astype(float)
+    r = np.log(r).diff().dropna().to_numpy()
+    if len(r) < 2:
+        return {'impact_half_life': np.nan}
+    r0 = r[:-1] - np.mean(r[:-1])
+    r1 = r[1:] - np.mean(r[1:])
+    denom = np.sqrt(np.sum(r0**2) * np.sum(r1**2))
+    if denom == 0:
+        return {'impact_half_life': np.nan}
+    rho = float(np.sum(r0 * r1) / denom)
+    if not (0 < rho < 1):
+        return {'impact_half_life': np.nan}
+    t_half = np.log(2.0) / (-np.log(rho))
+    return {'impact_half_life': float(t_half)}
+
+
+def _factor_price_impact_decomposition(seg: pd.DataFrame) -> Dict[str, float]:
+    """
+    冲击占比（简化）：
+    permanent_share ≈ |p_end - p_start| / (∑|Δp| + eps)
+    transient_share = 1 - permanent_share
+    """
+    if len(seg) < 2:
+        return {'impact_perm_share': np.nan, 'impact_transient_share': np.nan}
+    p = seg.sort_values('time')['price'].astype(float).to_numpy()
+    dp = np.diff(p)
+    denom = float(np.sum(np.abs(dp)))
+    if denom <= 0:
+        return {'impact_perm_share': np.nan, 'impact_transient_share': np.nan}
+    perm = float(np.abs(p[-1] - p[0]) / denom)
+    perm = float(np.clip(perm, 0.0, 1.0))
+    return {'impact_perm_share': perm, 'impact_transient_share': float(1.0 - perm)}
+
+
 def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Dict[str, float]:
     """
     在给定时间区间 [start_ts, end_ts) 内，逐笔计算区间特征。
@@ -574,11 +670,19 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     seg = df.loc[(df['time'] >= start_ts) & (df['time'] < end_ts)].copy()
 
     out = {}
+    # 基础交易统计（可按需启用）
     # out.update(_factor_int_trade_stats(seg, start_ts, end_ts))
+    # 订单流与旺盛度（如需一并启用可取消注释）
     out.update(_factor_order_flow_imbalance(seg))
     # out.update(_factor_garman_order_flow(seg))
     # out.update(_factor_rolling_ofi(seg))
     # out.update(_factor_activity_and_persistence(seg))
+    # 价格冲击/流动性代理
+    out.update(_factor_price_impact_kyle(seg))
+    out.update(_factor_price_impact_amihud(seg))
+    out.update(_factor_price_impact_hasbrouck(seg))
+    out.update(_factor_price_impact_halflife(seg))
+    out.update(_factor_price_impact_decomposition(seg))
     return out
 
 
