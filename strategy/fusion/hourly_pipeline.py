@@ -574,8 +574,8 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     seg = df.loc[(df['time'] >= start_ts) & (df['time'] < end_ts)].copy()
 
     out = {}
-    out.update(_factor_int_trade_stats(seg, start_ts, end_ts))
-    # out.update(_factor_order_flow_imbalance(seg))
+    # out.update(_factor_int_trade_stats(seg, start_ts, end_ts))
+    out.update(_factor_order_flow_imbalance(seg))
     # out.update(_factor_garman_order_flow(seg))
     # out.update(_factor_rolling_ofi(seg))
     # out.update(_factor_activity_and_persistence(seg))
