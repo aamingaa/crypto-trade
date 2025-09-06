@@ -446,6 +446,7 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
 def make_interval_feature_dataset(
     trades: pd.DataFrame,
     dollar_threshold: float,
+    feature_window_bars: int = 10,
     horizon_bars: int = 3,
     window_mode: str = 'past',  # 'past' 使用过去N个bar的[start,end)，'future' 使用未来N个bar（注意可能泄露）
     add_lags: int = 0,
@@ -472,14 +473,14 @@ def make_interval_feature_dataset(
     features = []
     for bar_id in close_s.index:
         if window_mode == 'past':
-            start_idx = bar_id - horizon_bars
+            start_idx = bar_id - feature_window_bars
             end_idx = bar_id - 1
             if start_idx < 0:
                 features.append({'bar_id': bar_id, '_skip': True})
                 continue
         else:  # future 区间（注意信息泄露，仅在需要时使用）
             start_idx = bar_id
-            end_idx = bar_id + horizon_bars - 1
+            end_idx = bar_id + feature_window_bars - 1
             if end_idx >= len(bars):
                 features.append({'bar_id': bar_id, '_skip': True})
                 continue
@@ -516,10 +517,11 @@ def make_interval_feature_dataset(
 def run_bar_interval_pipeline(
     trades: pd.DataFrame,
     dollar_threshold: float,
+    feature_window_bars: int = 10,
     horizon_bars: int = 3,
     window_mode: str = 'past',
     n_splits: int = 5,
-    embargo_bars: int = 1,
+    embargo_bars: Optional[int] = None,
     model_type: str = 'ridge',
     random_state: int = 42,
 ) -> Dict:
@@ -530,6 +532,7 @@ def run_bar_interval_pipeline(
     X, y, bars = make_interval_feature_dataset(
         trades=trades,
         dollar_threshold=dollar_threshold,
+        feature_window_bars=feature_window_bars,
         horizon_bars=horizon_bars,
         window_mode=window_mode,
     )
@@ -547,7 +550,13 @@ def run_bar_interval_pipeline(
     # embargo 转换为时间长度
     durations = (bars['end_time'] - bars['start_time']).dropna()
     median_duration = durations.median() if not durations.empty else pd.Timedelta(0)
-    embargo_td = median_duration * int(max(0, embargo_bars))
+    # 自动放大 embargo：至少覆盖 feature_window_bars 的时间长度；若用户给了 embargo_bars，则取两者较大
+    auto_embargo_td = median_duration * int(max(1, feature_window_bars))
+    if embargo_bars is not None:
+        user_embargo_td = median_duration * int(max(0, embargo_bars))
+        embargo_td = max(auto_embargo_td, user_embargo_td)
+    else:
+        embargo_td = auto_embargo_td
 
     eval_result = purged_cv_evaluate(
         X=X2,
@@ -595,10 +604,11 @@ def main():
     res = run_bar_interval_pipeline(
         trades=trades_df,
         dollar_threshold=10000 * 2000,
+        feature_window_bars=10,
         horizon_bars=3,
         window_mode='past',
         n_splits=5,
-        embargo_bars=1,
+        embargo_bars=None,
         model_type='ridge',
     )
     print(res.get('eval', {}).get('summary'))
