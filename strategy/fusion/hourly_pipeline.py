@@ -926,6 +926,305 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     return out
 
 
+# ========= 高性能实现：一次预处理 + 前缀和O(1)聚合 =========
+class TradesContext:
+    def __init__(self, t_ns: np.ndarray, price: np.ndarray, qty: np.ndarray, quote: np.ndarray, sign: np.ndarray):
+        self.t_ns = t_ns  # int64 ns 时间戳（已排序）
+        self.price = price.astype(np.float64)
+        self.qty = qty.astype(np.float64)
+        self.quote = quote.astype(np.float64)
+        self.sign = sign.astype(np.float64)
+
+        # 衍生量
+        self.logp = np.log(self.price)
+        self.ret = np.diff(self.logp)
+        self.ret2 = np.r_[0.0, self.ret ** 2]
+        # |r_t||r_{t-1}| 对齐成与 price 同长（首位补0）
+        abs_r = np.abs(self.ret)
+        bp_core = np.r_[0.0, np.r_[0.0, abs_r[1:] * abs_r[:-1]]]  # 与 price 对齐
+
+        # 前缀和（与 price 同长）
+        self.csum_qty = np.cumsum(self.qty)
+        self.csum_quote = np.cumsum(self.quote)
+        self.csum_signed_qty = np.cumsum(self.sign * self.qty)
+        self.csum_signed_quote = np.cumsum(self.sign * self.quote)
+        self.csum_pxqty = np.cumsum(self.price * self.qty)
+        self.csum_ret2 = np.cumsum(self.ret2)
+        self.csum_bpv = np.cumsum(bp_core)
+
+    def locate(self, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Tuple[int, int]:
+        s = np.searchsorted(self.t_ns, int(np.int64(np.datetime64(start_ts, 'ns'))), side='left')
+        e = np.searchsorted(self.t_ns, int(np.int64(np.datetime64(end_ts, 'ns'))), side='left')
+        return s, e
+
+
+def _build_trades_context(trades: pd.DataFrame) -> TradesContext:
+    df = trades
+    t = _ensure_datetime(df['time']).values.astype('datetime64[ns]').astype('int64')
+    order = np.argsort(t)
+    t_ns = t[order]
+    price = df['price'].to_numpy(dtype=float)[order]
+    qty = df['qty'].to_numpy(dtype=float)[order]
+    quote = (df['quote_qty'] if 'quote_qty' in df.columns else df['price'] * df['qty']).to_numpy(dtype=float)[order]
+    sign = np.where(df['is_buyer_maker'].to_numpy()[order], -1.0, 1.0)
+    return TradesContext(t_ns, price, qty, quote, sign)
+
+
+def _sum_range(prefix: np.ndarray, s: int, e: int) -> float:
+    if e <= s:
+        return 0.0
+    return float(prefix[e - 1] - (prefix[s - 1] if s > 0 else 0.0))
+
+
+def _compute_interval_trade_features_fast(ctx: TradesContext, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Dict[str, float]:
+    s, e = ctx.locate(start_ts, end_ts)
+    if e - s <= 0:
+        return {}
+
+    # 基础聚合
+    sum_qty = _sum_range(ctx.csum_qty, s, e)
+    sum_quote = _sum_range(ctx.csum_quote, s, e)
+    sum_signed_qty = _sum_range(ctx.csum_signed_qty, s, e)
+    sum_signed_quote = _sum_range(ctx.csum_signed_quote, s, e)
+    sum_pxqty = _sum_range(ctx.csum_pxqty, s, e)
+
+    vwap = sum_pxqty / sum_qty if sum_qty > 0 else np.nan
+    p_last = ctx.price[e - 1]
+    duration = max(1.0, (end_ts - start_ts).total_seconds())
+    intensity = (e - s) / duration
+
+    # RV/BPV/Jump（ret2、bpv 与 price 对齐）
+    rv = _sum_range(ctx.csum_ret2, s, e)
+    bpv = _sum_range(ctx.csum_bpv, s, e)
+    jump = max(rv - bpv, 0.0) if (np.isfinite(rv) and np.isfinite(bpv)) else np.nan
+
+    # Garman OF (count/volume)
+    n = float(e - s)
+    # count 口径用 sign 的平均（与逐笔实现等价）
+    gof_by_count = float(np.mean(np.sign(ctx.sign[s:e]))) if n > 0 else np.nan
+    gof_by_volume = (sum_signed_qty / sum_qty) if sum_qty > 0 else np.nan
+
+    # VWAP偏离（带符号）
+    dev = (p_last - vwap) / vwap if vwap != 0 and np.isfinite(vwap) else np.nan
+    signed_dev = dev * (1.0 if sum_signed_qty > 0 else (-1.0 if sum_signed_qty < 0 else 0.0)) if pd.notna(dev) else np.nan
+
+    # 微动量（短窗，用末尾W笔）
+    W = min(20, e - s)
+    if W >= 2:
+        lp = ctx.logp[max(s, e - W):e]
+        dp_short = float(lp[-1] - lp[0])
+        mu = float(np.mean(lp))
+        sd = float(np.std(lp))
+        z = (float(lp[-1]) - mu) / sd if sd > 0 else np.nan
+    else:
+        dp_short = np.nan
+        z = np.nan
+
+    # 价格冲击代理（Kyle/Amihud/Hasbrouck 简化，直接基于数组切片）
+    out_impact = {}
+    if e - s >= 3:
+        r = np.diff(ctx.logp[s:e])
+        sdollar = ctx.sign[s:e] * ctx.quote[s:e]
+        x = sdollar[1:]
+        y = r[1:]
+        varx = float(np.var(x))
+        kyle = float(np.cov(x, y, ddof=1)[0, 1] / varx) if varx > 0 else np.nan
+
+        amihud = float((np.abs(r) / (ctx.quote[s+1:e])).mean()) if np.all(ctx.quote[s+1:e] > 0) else np.nan
+
+        xh = np.sign(r) * np.sqrt(ctx.quote[s+1:e])
+        varxh = float(np.var(xh))
+        hasb = float(np.cov(xh, r[1:], ddof=1)[0, 1] / varxh) if varxh > 0 and len(r) > 2 else np.nan
+
+        # 半衰期
+        r0 = r[:-1] - np.mean(r[:-1])
+        r1 = r[1:] - np.mean(r[1:])
+        denom = np.sqrt(np.sum(r0**2) * np.sum(r1**2))
+        if denom > 0:
+            rho = float(np.sum(r0 * r1) / denom)
+            t_half = float(np.log(2.0) / (-np.log(rho))) if (0 < rho < 1) else np.nan
+        else:
+            t_half = np.nan
+
+        # 冲击占比
+        dp = np.diff(ctx.price[s:e])
+        denom2 = float(np.sum(np.abs(dp)))
+        if denom2 > 0:
+            perm = float(np.abs(ctx.price[e-1] - ctx.price[s]) / denom2)
+            perm = float(np.clip(perm, 0.0, 1.0))
+            trans = float(1.0 - perm)
+        else:
+            perm = np.nan
+            trans = np.nan
+        out_impact = {
+            'kyle_lambda': kyle,
+            'amihud_lambda': amihud,
+            'hasbrouck_lambda': hasb,
+            'impact_half_life': t_half,
+            'impact_perm_share': perm,
+            'impact_transient_share': trans,
+        }
+    
+    # 价格路径形状：协动相关性
+    out_path_corr = _fast_cum_signed_flow_price_corr(ctx, s, e)
+
+    # run-length / Markov / 翻转率
+    out_run = _fast_run_length_metrics(ctx, s, e)
+    out_markov = _fast_markov_persistence(ctx, s, e)
+
+    # 滚动OFI（区间内）
+    out_ofi = _fast_rolling_ofi_stats(ctx, s, e, window=min(20, e - s))
+
+    # Hawkes 近似聚簇
+    out_hawkes = _fast_hawkes_clustering(ctx, s, e)
+
+    base = {
+        'int_trade_vwap': vwap,
+        'int_trade_volume_sum': sum_qty,
+        'int_trade_dollar_sum': sum_quote,
+        'int_trade_signed_volume': sum_signed_qty,
+        'int_trade_buy_ratio': np.nan,
+        'int_trade_intensity': intensity,
+        'int_trade_rv': rv,
+        'ofi_signed_qty_sum': sum_signed_qty,
+        'ofi_signed_quote_sum': sum_signed_quote,
+        'gof_by_count': gof_by_count,
+        'gof_by_volume': gof_by_volume,
+        'rv': rv,
+        'bpv': bpv,
+        'jump_rv_bpv': jump,
+        'signed_vwap_deviation': signed_dev,
+        'vwap_deviation': dev,
+        'micro_dp_short': dp_short,
+        'micro_dp_zscore': z,
+    }
+    out = {}
+    out.update(base)
+    out.update(out_impact)
+    out.update(out_path_corr)
+    out.update(out_run)
+    out.update(out_markov)
+    out.update(out_ofi)
+    out.update(out_hawkes)
+    return out
+
+
+def _fast_run_length_metrics(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
+    if e - s <= 0:
+        return {'runlen_buy_max': 0.0, 'runlen_sell_max': 0.0, 'runlen_buy_mean': np.nan, 'runlen_sell_mean': np.nan}
+    sgn = np.sign(ctx.sign[s:e]).astype(np.int8)
+    if sgn.size == 0:
+        return {'runlen_buy_max': 0.0, 'runlen_sell_max': 0.0, 'runlen_buy_mean': np.nan, 'runlen_sell_mean': np.nan}
+    runs = []
+    cur = sgn[0]
+    length = 1
+    for val in sgn[1:]:
+        if val == cur:
+            length += 1
+        else:
+            runs.append((cur, length))
+            cur = val
+            length = 1
+    runs.append((cur, length))
+    buy_runs = [l for s_, l in runs if s_ > 0]
+    sell_runs = [l for s_, l in runs if s_ < 0]
+    return {
+        'runlen_buy_max': float(max(buy_runs)) if buy_runs else 0.0,
+        'runlen_sell_max': float(max(sell_runs)) if sell_runs else 0.0,
+        'runlen_buy_mean': float(np.mean(buy_runs)) if buy_runs else np.nan,
+        'runlen_sell_mean': float(np.mean(sell_runs)) if sell_runs else np.nan,
+    }
+
+
+def _fast_markov_persistence(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
+    if e - s <= 1:
+        return {'alt_frequency': np.nan, 'p_pos_to_pos': np.nan, 'p_neg_to_neg': np.nan, 'hf_flip_rate': np.nan}
+    sgn = np.sign(ctx.sign[s:e]).astype(np.int8)
+    flips = int(np.count_nonzero(np.diff(sgn)))
+    alt_frequency = flips / (len(sgn) - 1)
+    from_pos = sgn[:-1] > 0
+    to_pos = sgn[1:] > 0
+    from_neg = sgn[:-1] < 0
+    to_neg = sgn[1:] < 0
+    pos_count = int(from_pos.sum())
+    neg_count = int(from_neg.sum())
+    p_pos_to_pos = float((from_pos & to_pos).sum() / pos_count) if pos_count > 0 else np.nan
+    p_neg_to_neg = float((from_neg & to_neg).sum() / neg_count) if neg_count > 0 else np.nan
+    return {'alt_frequency': float(alt_frequency), 'p_pos_to_pos': p_pos_to_pos, 'p_neg_to_neg': p_neg_to_neg, 'hf_flip_rate': float(alt_frequency)}
+
+
+def _fast_rolling_ofi_stats(ctx: TradesContext, s: int, e: int, window: int = 20) -> Dict[str, float]:
+    if e - s <= 0 or window <= 1:
+        return {'ofi_roll_sum_max': 0.0, 'ofi_roll_sum_std': 0.0}
+    arr = (ctx.sign[s:e] * ctx.qty[s:e]).astype(np.float64)
+    if arr.size < window:
+        return {'ofi_roll_sum_max': float(arr.sum()), 'ofi_roll_sum_std': 0.0}
+    csum = np.cumsum(arr)
+    roll = csum[window - 1:] - np.r_[0.0, csum[:-window]]
+    return {'ofi_roll_sum_max': float(np.max(roll)), 'ofi_roll_sum_std': float(np.std(roll))}
+
+
+def _fast_hawkes_clustering(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
+    if e - s <= 0:
+        return {
+            'hawkes_cluster_count': 0.0,
+            'hawkes_cluster_size_mean': np.nan,
+            'hawkes_cluster_size_max': 0.0,
+            'hawkes_clustering_degree': np.nan,
+        }
+    t = ctx.t_ns[s:e].astype(np.float64) / 1e9
+    if t.size <= 1:
+        return {
+            'hawkes_cluster_count': 1.0,
+            'hawkes_cluster_size_mean': float(t.size),
+            'hawkes_cluster_size_max': float(t.size),
+            'hawkes_clustering_degree': 1.0,
+        }
+    gaps = np.diff(t)
+    tau = float(np.nanmedian(gaps)) if np.isfinite(np.nanmedian(gaps)) else 0.0
+    tau = max(tau, 0.001)
+    clusters = []
+    cur = 1
+    for g in gaps:
+        if g <= tau:
+            cur += 1
+        else:
+            clusters.append(cur)
+            cur = 1
+    clusters.append(cur)
+    size_mean = float(np.mean(clusters)) if clusters else np.nan
+    size_max = float(np.max(clusters)) if clusters else 0.0
+    degree = size_mean / float(e - s) if clusters else np.nan
+    return {
+        'hawkes_cluster_count': float(len(clusters)),
+        'hawkes_cluster_size_mean': size_mean,
+        'hawkes_cluster_size_max': size_max,
+        'hawkes_clustering_degree': float(degree) if pd.notna(degree) else np.nan,
+    }
+
+
+def _fast_cum_signed_flow_price_corr(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
+    if e - s <= 2:
+        return {'corr_cumsum_signed_qty_logp': np.nan, 'corr_cumsum_signed_dollar_logp': np.nan}
+    # 累计相对序列
+    logp_rel = ctx.logp[s:e] - ctx.logp[s]
+    cs_signed_qty = (ctx.csum_signed_qty[s:e] - (ctx.csum_signed_qty[s] if s < ctx.csum_signed_qty.size else 0.0))
+    cs_signed_dollar = (ctx.csum_signed_quote[s:e] - (ctx.csum_signed_quote[s] if s < ctx.csum_signed_quote.size else 0.0))
+    def _corr(a: np.ndarray, b: np.ndarray) -> float:
+        if a.size != b.size or a.size < 3:
+            return np.nan
+        sa = np.std(a)
+        sb = np.std(b)
+        if sa == 0 or sb == 0:
+            return np.nan
+        c = np.corrcoef(a, b)[0, 1]
+        return float(c) if np.isfinite(c) else np.nan
+    return {
+        'corr_cumsum_signed_qty_logp': _corr(cs_signed_qty, logp_rel),
+        'corr_cumsum_signed_dollar_logp': _corr(cs_signed_dollar, logp_rel),
+    }
+
+
 def make_interval_feature_dataset(
     trades: pd.DataFrame,
     dollar_threshold: float,
@@ -952,6 +1251,9 @@ def make_interval_feature_dataset(
     # 未来 N-bar 对数收益
     y = np.log(close_s.shift(-horizon_bars) / close_s)
 
+    # 预构建高性能上下文（一次即可）
+    ctx = _build_trades_context(trades)
+
     # 计算每个样本的区间
     features = []
     idx = 1
@@ -971,7 +1273,7 @@ def make_interval_feature_dataset(
                 
         start_ts = bars.loc[start_idx, 'start_time']
         end_ts = bars.loc[end_idx, 'end_time']
-        feat = _compute_interval_trade_features(trades, start_ts, end_ts)
+        feat = _compute_interval_trade_features_fast(ctx, start_ts, end_ts)
         print(idx)
         idx = idx + 1
         feat['bar_id'] = bar_id
