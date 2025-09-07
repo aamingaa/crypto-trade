@@ -8,11 +8,7 @@ from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
-
-# from util.dollarbar_fusion import (
-#     build_dollar_bars,
-#     aggregate_trade_features_on_bars,
-# )
+import matplotlib.pyplot as plt
 
 def _ensure_datetime(series: pd.Series) -> pd.Series:
     # 若已是datetime类型，直接返回
@@ -321,6 +317,8 @@ def purged_cv_evaluate(
         else:
             sharpe_net_ann = np.nan
 
+        plot_predictions_vs_truth(yhat, yte, save_path = '/Users/aming/project/python/crypto-trade/strategy/fusion/pic/')
+
         by_fold.append({
             'fold': fold_id,
             'pearson_ic': float(pearson_ic),
@@ -398,68 +396,6 @@ def make_barlevel_dataset(
 
     return X_bar, y_bar, bars, bar_feat
 
-
-def run_barlevel_pipeline(
-    trades: pd.DataFrame,
-    dollar_threshold: float,
-    horizon_bars: int = 1,
-    add_lags: int = 2,
-    rolling_windows: Optional[List[int]] = None,
-    rolling_stats: Optional[List[str]] = None,
-    n_splits: int = 5,
-    embargo_bars: int = 0,
-    model_type: str = 'ridge',
-    random_state: int = 42,
-) -> Dict:
-    """
-    端到端：逐笔 -> 事件Bar -> Bar级特征 -> Purged CV（按bar索引，使用等距切片近似）
-    注意：这里的 purged 分割在 bar 索引上做，embargo_bars 控制左右留白根数。
-    """
-    Xb, yb, bars, bar_feat = make_barlevel_dataset(
-        trades=trades,
-        dollar_threshold=dollar_threshold,
-        horizon_bars=horizon_bars,
-        add_lags=add_lags,
-        rolling_windows=rolling_windows,
-        rolling_stats=rolling_stats,
-    )
-
-    if Xb.empty or yb.empty:
-        return {
-            'error': '数据不足或阈值设置过大，无法构造训练集（bar级）',
-            'X_bar': Xb,
-            'y_bar': yb,
-            'bars': bars,
-            'bar_features': bar_feat,
-        }
-
-    # 使用真实 bar 的 end_time 作为时间索引
-    bar_times = bars.set_index('bar_id')['end_time']
-    idx_time = pd.to_datetime(bar_times.loc[Xb.index])
-    Xb2 = Xb.copy(); Xb2.index = idx_time
-    yb2 = yb.copy(); yb2.index = idx_time
-
-    # 将 embargo_bars 转换为时间间隔：使用 bar 的中位时长作为单位
-    bar_durations = (bars['end_time'] - bars['start_time']).dropna()
-    median_duration = bar_durations.median() if not bar_durations.empty else pd.Timedelta(0)
-    embargo = median_duration * int(max(0, embargo_bars))
-    eval_result = purged_cv_evaluate(
-        X=Xb2,
-        y=yb2,
-        n_splits=n_splits,
-        embargo=embargo,
-        model_type=model_type,
-        random_state=random_state,
-    )
-
-    out = {
-        'eval': eval_result,
-        'X_bar': Xb,
-        'y_bar': yb,
-        'bars': bars,
-        'bar_features': bar_feat,
-    }
-    return out
 
 
 def _factor_int_trade_stats(seg: pd.DataFrame, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Dict[str, float]:
@@ -962,10 +898,10 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     # 基础交易统计（可按需启用）
     # out.update(_factor_int_trade_stats(seg, start_ts, end_ts))
     # 订单流与旺盛度（如需一并启用可取消注释）
-    out.update(_factor_order_flow_imbalance(seg))
+    # out.update(_factor_order_flow_imbalance(seg))
     # out.update(_factor_garman_order_flow(seg))
     # out.update(_factor_rolling_ofi(seg))
-    # out.update(_factor_activity_and_persistence(seg))
+    out.update(_factor_activity_and_persistence(seg))
     # # 价格冲击/流动性代理
     # out.update(_factor_price_impact_kyle(seg))
     # out.update(_factor_price_impact_amihud(seg))
@@ -980,9 +916,9 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     # out.update(_factor_mean_reversion_strength(seg))
     # out.update(_factor_highlow_amplitude_ratio(seg))
     # # 成交节奏与聚簇
-    # out.update(_factor_arrival_rate_metrics(seg, start_ts, end_ts))
-    # out.update(_factor_hawkes_like_clustering(seg, start_ts, end_ts))
-    # out.update(_factor_large_trade_tail_share(seg))
+    out.update(_factor_arrival_rate_metrics(seg, start_ts, end_ts))
+    out.update(_factor_hawkes_like_clustering(seg, start_ts, end_ts))
+    out.update(_factor_large_trade_tail_share(seg))
     #     # 价格路径形状
     # out.update(_factor_cum_signed_flow_price_corr(seg))
     # out.update(_factor_signed_vwap_deviation(seg))
@@ -1134,6 +1070,56 @@ def run_bar_interval_pipeline(
  
 
 
+def plot_predictions_vs_truth(
+    preds: pd.Series,
+    y: pd.Series,
+    title: str = 'Pred vs True',
+    save_path: Optional[str] = None,
+) -> None:
+    """
+    画预测值与真实值曲线，并标注基于 sign(pred) 的交易变更时间点（纵线+箭头）。
+    preds: 索引为时间（DatetimeIndex）的预测序列
+    y:     同索引的真实标签序列（若不一致会自动对齐）
+    """
+    if preds is None or len(preds) == 0:
+        return
+    # 对齐索引
+    idx = preds.dropna().index.intersection(y.dropna().index)
+    if len(idx) == 0:
+        return
+    y_plot = y.loc[idx].astype(float)
+    p_plot = preds.loc[idx].astype(float)
+
+    # 基于预测生成持仓与换手点
+    pos = np.sign(p_plot).fillna(0.0)
+    change = pos.diff().fillna(pos.iloc[0])
+    turnover = change.abs()
+    trade_times = turnover[turnover > 0].index
+    long_entries = change[change > 0].index
+    short_entries = change[change < 0].index
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(y_plot.index, y_plot.values, label='y_true', color='#1f77b4', alpha=0.8)
+    ax.plot(p_plot.index, p_plot.values, label='y_pred', color='#ff7f0e', alpha=0.8)
+
+    # 标注交易变更时间点
+    for t in trade_times:
+        ax.axvline(t, color='gray', alpha=0.15, linewidth=1)
+    ax.scatter(long_entries, np.zeros(len(long_entries)), marker='^', color='green', label='enter long', zorder=3)
+    ax.scatter(short_entries, np.zeros(len(short_entries)), marker='v', color='red', label='enter short', zorder=3)
+
+    ax.axhline(0.0, color='black', linewidth=0.8, alpha=0.3)
+    ax.set_title(title)
+    ax.legend(loc='best')
+    ax.grid(True, alpha=0.2)
+    fig.autofmt_xdate()
+
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight')
+        plt.close(fig)
+    else:
+        plt.show()
+
 __all__ = [
     'purged_cv_evaluate',
     'make_barlevel_dataset',
@@ -1155,7 +1141,7 @@ def generate_date_range(start_date, end_date):
 
 def main():    
     raw_df = []
-    date_list = generate_date_range('2025-01-01', '2025-01-02')
+    date_list = generate_date_range('2025-01-01', '2025-01-05')
     for date in date_list:
         raw_df.append(pd.read_csv(f'/Volumes/Ext-Disk/data/futures/um/daily/trades/ETHUSDT/ETHUSDT-trades-{date}.zip'))
         
