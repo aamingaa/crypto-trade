@@ -1023,10 +1023,10 @@ def _compute_interval_trade_features_fast(ctx: TradesContext, start_ts: pd.Times
     # 价格冲击代理（Kyle/Amihud/Hasbrouck 简化，直接基于数组切片）
     out_impact = {}
     if e - s >= 3:
-        r = np.diff(ctx.logp[s:e])
-        sdollar = ctx.sign[s:e] * ctx.quote[s:e]
-        x = sdollar[1:]
-        y = r[1:]
+        r = np.diff(ctx.logp[s:e])                # 长度 K-1
+        sdollar = ctx.sign[s:e] * ctx.quote[s:e]  # 长度 K
+        x = sdollar[1:]                           # 与 r 同步（索引 1..K-1）
+        y = r                                     # 长度 K-1，与 x 对齐
         varx = float(np.var(x))
         kyle = float(np.cov(x, y, ddof=1)[0, 1] / varx) if varx > 0 else np.nan
 
@@ -1034,7 +1034,7 @@ def _compute_interval_trade_features_fast(ctx: TradesContext, start_ts: pd.Times
 
         xh = np.sign(r) * np.sqrt(ctx.quote[s+1:e])
         varxh = float(np.var(xh))
-        hasb = float(np.cov(xh, r[1:], ddof=1)[0, 1] / varxh) if varxh > 0 and len(r) > 2 else np.nan
+        hasb = float(np.cov(xh, r, ddof=1)[0, 1] / varxh) if varxh > 0 and len(r) > 1 else np.nan
 
         # 半衰期
         r0 = r[:-1] - np.mean(r[:-1])
@@ -1326,7 +1326,7 @@ def run_bar_interval_pipeline(
     )
     
     mask = y.notna() & np.isfinite(y.values)
-    X = X.loc[mask].replace([np.inf, -np.inf], np.nan).dropna()
+    X = X.loc[mask].replace([np.inf, -np.inf], np.nan)
     y = y.loc[X.index]
 
     if X.empty or y.empty:
