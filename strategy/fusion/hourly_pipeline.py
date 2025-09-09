@@ -784,6 +784,68 @@ def _factor_large_trade_tail_share(seg: pd.DataFrame, q: float = 0.9) -> Dict[st
         'large_tail_dollar_mean': mean_large,
     }
 
+def _factor_large_trade_tail_directional(seg: pd.DataFrame, q_list: Optional[List[float]] = None) -> Dict[str, float]:
+    """
+    大单买卖方向分解（慢速）：对每个分位阈值 q，分别统计买/卖大单的金额占比、笔数占比与均额，
+    并给出买卖金额占比差值（买-卖）。
+    输出键示例：
+      - large_buy_tail_dollar_share_q90, large_sell_tail_dollar_share_q90, large_tail_dir_dollar_diff_q90
+      - large_buy_tail_trade_share_q95, large_sell_tail_trade_share_q95
+      - large_buy_tail_dollar_mean_q90, large_sell_tail_dollar_mean_q90
+    """
+    q_list = q_list or [0.9, 0.95]
+    out: Dict[str, float] = {}
+    if seg.empty:
+        for q in q_list:
+            suffix = f"q{int(round(q*100))}"
+            out[f'large_buy_tail_dollar_share_{suffix}'] = np.nan
+            out[f'large_sell_tail_dollar_share_{suffix}'] = np.nan
+            out[f'large_tail_dir_dollar_diff_{suffix}'] = np.nan
+            out[f'large_buy_tail_trade_share_{suffix}'] = np.nan
+            out[f'large_sell_tail_trade_share_{suffix}'] = np.nan
+            out[f'large_buy_tail_dollar_mean_{suffix}'] = np.nan
+            out[f'large_sell_tail_dollar_mean_{suffix}'] = np.nan
+        return out
+
+    dv = seg['quote_qty'].astype(float)
+    sgn = seg['trade_sign'].astype(int)
+    dv_sum = float(dv.sum())
+
+    for q in q_list:
+        suffix = f"q{int(round(q*100))}"
+        thr = float(np.quantile(dv, q)) if len(dv) > 0 else np.nan
+        if not np.isfinite(thr) or thr <= 0 or dv_sum <= 0:
+            out[f'large_buy_tail_dollar_share_{suffix}'] = np.nan
+            out[f'large_sell_tail_dollar_share_{suffix}'] = np.nan
+            out[f'large_tail_dir_dollar_diff_{suffix}'] = np.nan
+            out[f'large_buy_tail_trade_share_{suffix}'] = np.nan
+            out[f'large_sell_tail_trade_share_{suffix}'] = np.nan
+            out[f'large_buy_tail_dollar_mean_{suffix}'] = np.nan
+            out[f'large_sell_tail_dollar_mean_{suffix}'] = np.nan
+            continue
+
+        mask_large = dv >= thr
+        buy_large = mask_large & (sgn > 0)
+        sell_large = mask_large & (sgn < 0)
+
+        buy_dollar_share = float(dv[buy_large].sum() / dv_sum) if dv_sum > 0 else np.nan
+        sell_dollar_share = float(dv[sell_large].sum() / dv_sum) if dv_sum > 0 else np.nan
+        dir_dollar_diff = (buy_dollar_share - sell_dollar_share) if (pd.notna(buy_dollar_share) and pd.notna(sell_dollar_share)) else np.nan
+
+        buy_trade_share = float(buy_large.mean())
+        sell_trade_share = float(sell_large.mean())
+        buy_mean = float(dv[buy_large].mean()) if buy_large.any() else np.nan
+        sell_mean = float(dv[sell_large].mean()) if sell_large.any() else np.nan
+
+        out[f'large_buy_tail_dollar_share_{suffix}'] = buy_dollar_share
+        out[f'large_sell_tail_dollar_share_{suffix}'] = sell_dollar_share
+        out[f'large_tail_dir_dollar_diff_{suffix}'] = dir_dollar_diff
+        out[f'large_buy_tail_trade_share_{suffix}'] = buy_trade_share
+        out[f'large_sell_tail_trade_share_{suffix}'] = sell_trade_share
+        out[f'large_buy_tail_dollar_mean_{suffix}'] = buy_mean
+        out[f'large_sell_tail_dollar_mean_{suffix}'] = sell_mean
+    return out
+
 def _factor_price_impact_kyle(seg: pd.DataFrame) -> Dict[str, float]:
     """
     Kyle λ：回归 Δlog(price) 对 签名成交额（quote_qty * sign）。
@@ -919,6 +981,8 @@ def _compute_interval_trade_features(trades: pd.DataFrame, start_ts: pd.Timestam
     out.update(_factor_arrival_rate_metrics(seg, start_ts, end_ts))
     out.update(_factor_hawkes_like_clustering(seg, start_ts, end_ts))
     out.update(_factor_large_trade_tail_share(seg))
+    # 大单买卖方向分解（慢速）
+    out.update(_factor_large_trade_tail_directional(seg, q_list=[0.9, 0.95]))
     #     # 价格路径形状
     out.update(_factor_cum_signed_flow_price_corr(seg))
     out.update(_factor_signed_vwap_deviation(seg))
@@ -988,6 +1052,7 @@ def _default_features_config() -> Dict[str, bool]:
         'hawkes': True,                 # 聚簇（Hawkes近似）
         'path_shape': True,             # 协动相关/VWAP偏离
         'tail': True,                   # 大单尾部比例
+        'tail_directional': True,       # 大单买卖方向性（分位阈值法）
     }
 
 
@@ -997,6 +1062,7 @@ def _compute_interval_trade_features_fast(
     end_ts: pd.Timestamp,
     features_config: Optional[Dict[str, bool]] = None,
     tail_q: float = 0.9,
+    tail_q_list: Optional[List[float]] = None,
 ) -> Dict[str, float]:
     s, e = ctx.locate(start_ts, end_ts)
     if e - s <= 0:
@@ -1149,6 +1215,11 @@ def _compute_interval_trade_features_fast(
                     'large_tail_trade_share': share_trade,
                     'large_tail_dollar_mean': mean_large,
                 }
+    # 大单买卖方向性（分位阈值列表）
+    out_tail_dir = {}
+    if cfg.get('tail_directional', False) and (e - s) > 0:
+        q_list = tail_q_list or [0.9, 0.95]
+        out_tail_dir = _fast_large_trade_tail_directional(ctx, s, e, q_list)
     out = {}
     out.update(base)
     out.update(out_impact)
@@ -1158,6 +1229,7 @@ def _compute_interval_trade_features_fast(
     out.update(out_ofi)
     out.update(out_hawkes)
     out.update(out_tail)
+    out.update(out_tail_dir)
     return out
 
 
@@ -1551,7 +1623,7 @@ def generate_date_range(start_date, end_date):
 
 def main():    
     raw_df = []
-    date_list = generate_date_range('2025-01-01', '2025-01-05')
+    date_list = generate_date_range('2025-01-01', '2025-01-01')
     for date in date_list:
         raw_df.append(pd.read_csv(f'/Volumes/Ext-Disk/data/futures/um/daily/trades/ETHUSDT/ETHUSDT-trades-{date}.zip'))
         
