@@ -976,10 +976,35 @@ def _sum_range(prefix: np.ndarray, s: int, e: int) -> float:
     return float(prefix[e - 1] - (prefix[s - 1] if s > 0 else 0.0))
 
 
-def _compute_interval_trade_features_fast(ctx: TradesContext, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Dict[str, float]:
+def _default_features_config() -> Dict[str, bool]:
+    return {
+        'base': True,                   # 基础汇总/VWAP/强度/买量占比
+        'order_flow': True,             # GOF/签名不平衡
+        'price_impact': True,           # Kyle/Amihud/Hasbrouck/半衰期/占比
+        'volatility_noise': True,       # RV/BPV/Jump/微动量/均值回复/高低幅比
+        'arrival_stats': True,          # 到达间隔统计
+        'run_markov': True,             # run-length/Markov/翻转率
+        'rolling_ofi': True,            # 滚动OFI
+        'hawkes': True,                 # 聚簇（Hawkes近似）
+        'path_shape': True,             # 协动相关/VWAP偏离
+        'tail': True,                   # 大单尾部比例
+    }
+
+
+def _compute_interval_trade_features_fast(
+    ctx: TradesContext,
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+    features_config: Optional[Dict[str, bool]] = None,
+    tail_q: float = 0.9,
+) -> Dict[str, float]:
     s, e = ctx.locate(start_ts, end_ts)
     if e - s <= 0:
         return {}
+
+    cfg = _default_features_config()
+    if features_config:
+        cfg.update(features_config)
 
     # 基础聚合
     sum_qty = _sum_range(ctx.csum_qty, s, e)
@@ -1008,6 +1033,11 @@ def _compute_interval_trade_features_fast(ctx: TradesContext, start_ts: pd.Times
     dev = (p_last - vwap) / vwap if vwap != 0 and np.isfinite(vwap) else np.nan
     signed_dev = dev * (1.0 if sum_signed_qty > 0 else (-1.0 if sum_signed_qty < 0 else 0.0)) if pd.notna(dev) else np.nan
 
+    # 买量占比
+    buy_mask = ctx.sign[s:e] > 0
+    buy_qty = float(ctx.qty[s:e][buy_mask].sum()) if (e - s) > 0 else 0.0
+    trade_buy_ratio = (buy_qty / sum_qty) if sum_qty > 0 else np.nan
+
     # 微动量（短窗，用末尾W笔）
     W = min(20, e - s)
     if W >= 2:
@@ -1020,84 +1050,105 @@ def _compute_interval_trade_features_fast(ctx: TradesContext, start_ts: pd.Times
         dp_short = np.nan
         z = np.nan
 
-    # 价格冲击代理（Kyle/Amihud/Hasbrouck 简化，直接基于数组切片）
-    out_impact = {}
-    if e - s >= 3:
-        r = np.diff(ctx.logp[s:e])                # 长度 K-1
-        sdollar = ctx.sign[s:e] * ctx.quote[s:e]  # 长度 K
-        x = sdollar[1:]                           # 与 r 同步（索引 1..K-1）
-        y = r                                     # 长度 K-1，与 x 对齐
-        varx = float(np.var(x))
-        kyle = float(np.cov(x, y, ddof=1)[0, 1] / varx) if varx > 0 else np.nan
+    # 到达间隔统计
+    t_slice = ctx.t_ns[s:e].astype(np.float64) / 1e9
+    if cfg['arrival_stats'] and t_slice.size >= 2:
+        gaps = np.diff(t_slice)
+        arr_interval_mean = float(np.mean(gaps))
+        arr_interval_var = float(np.var(gaps))
+        arr_interval_inv_mean = float(np.mean(1.0 / gaps)) if np.all(gaps > 0) else np.nan
+    else:
+        arr_interval_mean = np.nan
+        arr_interval_var = np.nan
+        arr_interval_inv_mean = np.nan
 
-        amihud = float((np.abs(r) / (ctx.quote[s+1:e])).mean()) if np.all(ctx.quote[s+1:e] > 0) else np.nan
+    # 均值回复强度（lag-1 自相关）与高低幅度占比
+    r_slice = np.diff(ctx.logp[s:e])
+    if cfg['volatility_noise'] and r_slice.size >= 2:
+        x0 = r_slice[:-1] - np.mean(r_slice[:-1])
+        x1 = r_slice[1:] - np.mean(r_slice[1:])
+        denom = np.sqrt(np.sum(x0**2) * np.sum(x1**2))
+        mr_rho1 = float(np.sum(x0 * x1) / denom) if denom > 0 else np.nan
+        mr_strength = -mr_rho1 if pd.notna(mr_rho1) else np.nan
+    else:
+        mr_rho1 = np.nan
+        mr_strength = np.nan
 
-        xh = np.sign(r) * np.sqrt(ctx.quote[s+1:e])
-        varxh = float(np.var(xh))
-        hasb = float(np.cov(xh, r, ddof=1)[0, 1] / varxh) if varxh > 0 and len(r) > 1 else np.nan
+    if cfg['volatility_noise'] and (e - s) > 0:
+        hi = float(np.max(ctx.price[s:e]))
+        lo = float(np.min(ctx.price[s:e]))
+        mid = (hi + lo) / 2.0
+        hl_amplitude_ratio = float((hi - lo) / mid) if mid != 0 else np.nan
+    else:
+        hl_amplitude_ratio = np.nan
 
-        # 半衰期
-        r0 = r[:-1] - np.mean(r[:-1])
-        r1 = r[1:] - np.mean(r[1:])
-        denom = np.sqrt(np.sum(r0**2) * np.sum(r1**2))
-        if denom > 0:
-            rho = float(np.sum(r0 * r1) / denom)
-            t_half = float(np.log(2.0) / (-np.log(rho))) if (0 < rho < 1) else np.nan
-        else:
-            t_half = np.nan
-
-        # 冲击占比
-        dp = np.diff(ctx.price[s:e])
-        denom2 = float(np.sum(np.abs(dp)))
-        if denom2 > 0:
-            perm = float(np.abs(ctx.price[e-1] - ctx.price[s]) / denom2)
-            perm = float(np.clip(perm, 0.0, 1.0))
-            trans = float(1.0 - perm)
-        else:
-            perm = np.nan
-            trans = np.nan
-        out_impact = {
-            'kyle_lambda': kyle,
-            'amihud_lambda': amihud,
-            'hasbrouck_lambda': hasb,
-            'impact_half_life': t_half,
-            'impact_perm_share': perm,
-            'impact_transient_share': trans,
-        }
+    # 价格冲击代理（Kyle/Amihud/Hasbrouck/半衰期/占比）
+    out_impact = _fast_price_impact_metrics(ctx, s, e) if cfg['price_impact'] else {}
     
     # 价格路径形状：协动相关性
-    out_path_corr = _fast_cum_signed_flow_price_corr(ctx, s, e)
+    out_path_corr = _fast_cum_signed_flow_price_corr(ctx, s, e) if cfg['path_shape'] else {}
 
     # run-length / Markov / 翻转率
-    out_run = _fast_run_length_metrics(ctx, s, e)
-    out_markov = _fast_markov_persistence(ctx, s, e)
+    out_run = _fast_run_length_metrics(ctx, s, e) if cfg['run_markov'] else {}
+    out_markov = _fast_markov_persistence(ctx, s, e) if cfg['run_markov'] else {}
 
     # 滚动OFI（区间内）
-    out_ofi = _fast_rolling_ofi_stats(ctx, s, e, window=min(20, e - s))
+    out_ofi = _fast_rolling_ofi_stats(ctx, s, e, window=min(20, e - s)) if cfg['rolling_ofi'] else {}
 
     # Hawkes 近似聚簇
-    out_hawkes = _fast_hawkes_clustering(ctx, s, e)
+    out_hawkes = _fast_hawkes_clustering(ctx, s, e) if cfg['hawkes'] else {}
 
-    base = {
-        'int_trade_vwap': vwap,
-        'int_trade_volume_sum': sum_qty,
-        'int_trade_dollar_sum': sum_quote,
-        'int_trade_signed_volume': sum_signed_qty,
-        'int_trade_buy_ratio': np.nan,
-        'int_trade_intensity': intensity,
-        'int_trade_rv': rv,
-        'ofi_signed_qty_sum': sum_signed_qty,
-        'ofi_signed_quote_sum': sum_signed_quote,
-        'gof_by_count': gof_by_count,
-        'gof_by_volume': gof_by_volume,
-        'rv': rv,
-        'bpv': bpv,
-        'jump_rv_bpv': jump,
-        'signed_vwap_deviation': signed_dev,
-        'vwap_deviation': dev,
-        'micro_dp_short': dp_short,
-        'micro_dp_zscore': z,
-    }
+    base = {}
+    if cfg['base']:
+        base.update({
+            'int_trade_vwap': vwap,
+            'int_trade_volume_sum': sum_qty,
+            'int_trade_dollar_sum': sum_quote,
+            'int_trade_signed_volume': sum_signed_qty,
+            'int_trade_buy_ratio': trade_buy_ratio,
+            'int_trade_intensity': intensity,
+            'int_trade_rv': rv,
+        })
+    if cfg['order_flow']:
+        base.update({
+            'ofi_signed_qty_sum': sum_signed_qty,
+            'ofi_signed_quote_sum': sum_signed_quote,
+            'gof_by_count': gof_by_count,
+            'gof_by_volume': gof_by_volume,
+        })
+    if cfg['volatility_noise']:
+        base.update({
+            'rv': rv,
+            'bpv': bpv,
+            'jump_rv_bpv': jump,
+            'micro_dp_short': dp_short,
+            'micro_dp_zscore': z,
+            'mr_rho1': mr_rho1,
+            'mr_strength': mr_strength,
+            'hl_amplitude_ratio': hl_amplitude_ratio,
+        })
+    if cfg['path_shape']:
+        base.update({
+            'signed_vwap_deviation': signed_dev,
+            'vwap_deviation': dev,
+        })
+
+    # 大单尾部比例
+    out_tail = {}
+    if cfg['tail'] and (e - s) > 0:
+        dv = ctx.quote[s:e]
+        if dv.size > 0:
+            thr = float(np.quantile(dv, tail_q))
+            if np.isfinite(thr) and thr > 0:
+                mask_tail = dv >= thr
+                share_dollar = float(dv[mask_tail].sum() / dv.sum()) if dv.sum() > 0 else np.nan
+                share_trade = float(mask_tail.mean())
+                mean_large = float(dv[mask_tail].mean()) if mask_tail.any() else np.nan
+                out_tail = {
+                    'large_tail_dollar_share': share_dollar,
+                    'large_tail_trade_share': share_trade,
+                    'large_tail_dollar_mean': mean_large,
+                }
     out = {}
     out.update(base)
     out.update(out_impact)
@@ -1106,7 +1157,64 @@ def _compute_interval_trade_features_fast(ctx: TradesContext, start_ts: pd.Times
     out.update(out_markov)
     out.update(out_ofi)
     out.update(out_hawkes)
+    out.update(out_tail)
     return out
+
+
+def _fast_price_impact_metrics(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
+    """
+    价格冲击与流动性代理（fast）：
+    - Kyle λ：Δlogp ~ signed_dollar（协方差/方差比）
+    - Amihud λ：mean(|Δlogp| / dollar)
+    - Hasbrouck（简化）：Δlogp ~ sign(Δlogp)*sqrt(dollar)
+    - impact_half_life：Δlogp 的 lag-1 自相关半衰期
+    - impact_perm/transient_share：|p_end - p_start| / ∑|Δp|
+    返回空dict表示样本不足。
+    """
+    if e - s < 3:
+        return {}
+    r = np.diff(ctx.logp[s:e])                # 长度 K-1
+    sdollar = ctx.sign[s:e] * ctx.quote[s:e]  # 长度 K
+    x = sdollar[1:]                           # 与 r 对齐
+    y = r
+    varx = float(np.var(x))
+    kyle = float(np.cov(x, y, ddof=1)[0, 1] / varx) if varx > 0 else np.nan
+
+    amihud = float((np.abs(r) / (ctx.quote[s+1:e])).mean()) if np.all(ctx.quote[s+1:e] > 0) else np.nan
+
+    xh = np.sign(r) * np.sqrt(ctx.quote[s+1:e])
+    varxh = float(np.var(xh))
+    hasb = float(np.cov(xh, r, ddof=1)[0, 1] / varxh) if varxh > 0 and len(r) > 1 else np.nan
+
+    # 半衰期
+    r0 = r[:-1] - np.mean(r[:-1])
+    r1 = r[1:] - np.mean(r[1:])
+    denom = np.sqrt(np.sum(r0**2) * np.sum(r1**2))
+    if denom > 0:
+        rho = float(np.sum(r0 * r1) / denom)
+        t_half = float(np.log(2.0) / (-np.log(rho))) if (0 < rho < 1) else np.nan
+    else:
+        t_half = np.nan
+
+    # 冲击占比
+    dp = np.diff(ctx.price[s:e])
+    denom2 = float(np.sum(np.abs(dp)))
+    if denom2 > 0:
+        perm = float(np.abs(ctx.price[e-1] - ctx.price[s]) / denom2)
+        perm = float(np.clip(perm, 0.0, 1.0))
+        trans = float(1.0 - perm)
+    else:
+        perm = np.nan
+        trans = np.nan
+
+    return {
+        'kyle_lambda': kyle,
+        'amihud_lambda': amihud,
+        'hasbrouck_lambda': hasb,
+        'impact_half_life': t_half,
+        'impact_perm_share': perm,
+        'impact_transient_share': trans,
+    }
 
 
 def _fast_run_length_metrics(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
