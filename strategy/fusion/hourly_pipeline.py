@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import warnings
+import os
 
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
@@ -106,9 +107,11 @@ def build_dollar_bars(
     cumulative = 0.0  # 累积成交额
     bar_id = 0        # 当前bar_id
     bar_ids = []      # 存储每个交易的bar_id
-    
+    bar_trade_counts={}
+
     for qty in df['quote_qty']:
         cumulative += qty
+        bar_trade_counts[bar_id] = bar_trade_counts.get(bar_id, 0) + 1
         # 当累积成交额达到阈值时，当前交易仍属于当前bar_id，随后bar_id递增并重置累积
         if cumulative >= dollar_threshold:
             bar_ids.append(bar_id)
@@ -118,8 +121,11 @@ def build_dollar_bars(
         else:
             bar_ids.append(bar_id)
     
-    df['bar_id'] = bar_ids
     
+    
+    df['bar_id'] = bar_ids
+    df['trades'] = df['bar_id'].map(bar_trade_counts)  # 关键修复：通过map对齐
+
     # 分组聚合
     agg = {
         'time': ['first', 'last'],
@@ -128,6 +134,7 @@ def build_dollar_bars(
         'quote_qty': 'sum',
         'buy_qty': 'sum',
         'sell_qty': 'sum',
+        'trades': 'first' 
     }
     g = df.groupby('bar_id', sort=True).agg(agg)
     
@@ -136,7 +143,7 @@ def build_dollar_bars(
         'start_time', 'end_time',
         'open', 'high', 'low', 'close',
         'volume', 'dollar_value',
-        'buy_volume', 'sell_volume'
+        'buy_volume', 'sell_volume','trades'
     ]
     
     # 仅过滤最后一个可能不完整的bar（若其成交额不足阈值）
@@ -1414,13 +1421,23 @@ def make_interval_feature_dataset(
     add_lags: int = 0,
     rolling_windows: Optional[List[int]] = None,
     rolling_stats: Optional[List[str]] = None,
+    bar_zip_path :str = None
 ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
     """
     标签：由 dollar bars 生成的未来 N-bar 对数收益。
     因子：对齐到对应区间 [start_time, end_time)（过去或未来N个bar）上基于逐笔成交直接计算。
     返回：X_interval, y, bars
     """
-    bars = build_dollar_bars(trades, dollar_threshold=dollar_threshold)
+
+    bars = None
+    if bar_zip_path is not None and os.path.exists(bar_zip_path):
+        bars = pd.read_csv(bar_zip_path)
+    else:
+        bars = build_dollar_bars(trades, dollar_threshold=dollar_threshold)
+        os.makedirs(os.path.dirname(bar_zip_path), exist_ok=True)
+        bars.to_csv(bar_zip_path, index=False,compression={'method': 'zip', 'archive_name': 'bars.csv'})
+
+
     if bars.empty:
         return pd.DataFrame(), pd.Series(dtype=float), bars
 
@@ -1492,6 +1509,7 @@ def run_bar_interval_pipeline(
     embargo_bars: Optional[int] = None,
     model_type: str = 'ridge',
     random_state: int = 42,
+    bar_zip_path: str = None,
 ) -> Dict:
     """
     按 N 个 dollar bar 定义的时间区间计算因子，标签为未来 N-bar 对数收益；
@@ -1503,6 +1521,7 @@ def run_bar_interval_pipeline(
         feature_window_bars=feature_window_bars,
         horizon_bars=horizon_bars,
         window_mode=window_mode,
+        bar_zip_path = bar_zip_path
     )
     
     mask = y.notna() & np.isfinite(y.values)
@@ -1622,26 +1641,47 @@ def generate_date_range(start_date, end_date):
     return date_list
 
 def main():    
-    raw_df = []
-    date_list = generate_date_range('2025-01-01', '2025-01-01')
-    for date in date_list:
-        raw_df.append(pd.read_csv(f'/Volumes/Ext-Disk/data/futures/um/daily/trades/ETHUSDT/ETHUSDT-trades-{date}.zip'))
-        
-    # dollar_bar = build_dollar_bars(raw_df, 10000 * 2000)
-    # print(dollar_bar)
+    start_date = '2025-01-01'
+    end_date = '2025-01-30'
+    dollar_threshold=10000*6000
+    dollar_threshold_str = str(dollar_threshold).replace("*", "_")
 
-    trades_df = pd.concat(raw_df, ignore_index=True)
+    date_list = generate_date_range(start_date, end_date)
+
+    trades_zip_path = f'/Users/aming/project/python/crypto-trade/output/trades-{start_date}-{end_date}-{dollar_threshold_str}.zip'
+    bar_zip_path = f'/Users/aming/project/python/crypto-trade/output/bars-{start_date}-{end_date}-{dollar_threshold_str}.zip'
+    trades_df = None
+
+    if trades_zip_path is not None and os.path.exists(trades_zip_path):
+        trades_df = pd.read_csv(trades_zip_path)
+    else:
+        raw_df = []
+        for date in date_list:
+            raw_df.append(pd.read_csv(f'/Volumes/Ext-Disk/data/futures/um/daily/trades/ETHUSDT/ETHUSDT-trades-{date}.zip'))
+        trades_df = pd.concat(raw_df, ignore_index=True)
+        
+        os.makedirs(os.path.dirname(trades_zip_path), exist_ok=True)
+        
+        trades_df.to_csv(
+            trades_zip_path,
+            index=False,
+            compression={'method': 'zip', 'archive_name': 'trades_df.csv'}  # zip里csv的文件名
+        )
+
+
+        
     res = run_bar_interval_pipeline(
         trades=trades_df,
-        dollar_threshold=10000 * 6000,
+        dollar_threshold=dollar_threshold,
         feature_window_bars=10,
         horizon_bars=3,
         window_mode='past',
         n_splits=5,
         embargo_bars=None,
         model_type='ridge',
+        bar_zip_path = bar_zip_path
     )
-    print(res.get('eval', {}).get('summary'))
+    # print(res.get('eval', {}).get('summary'))
 
 if __name__ == '__main__':
     main()
