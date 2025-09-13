@@ -997,8 +997,15 @@ def run_bar_interval_pipeline(
         random_state=random_state,
         period_seconds=period_seconds,
     )
+    
+    # 基于区间特征识别“大单主动买入”事件
+    # try:
+    #     events = detect_large_aggressive_buy(trades=trades, X_interval=X)
+    # except Exception:
+    #     events = pd.DataFrame()
 
     return {'eval': eval_result, 'X': X, 'y': y, 'bars': bars}
+    # return {'eval': eval_result, 'X': X, 'y': y, 'bars': bars, 'events_large_aggr_buy': events}
 
  
 
@@ -1059,6 +1066,7 @@ __all__ = [
     'run_barlevel_pipeline',
     'make_interval_feature_dataset',
     'run_bar_interval_pipeline',
+    'detect_large_aggressive_buy',
 ]
 
 def generate_date_range(start_date, end_date):    
@@ -1071,6 +1079,121 @@ def generate_date_range(start_date, end_date):
         date_list.append(current.strftime('%Y-%m-%d'))
         current += timedelta(days=1)
     return date_list
+
+def _robust_zscore(series: pd.Series) -> pd.Series:
+    """基于中位数与MAD的稳健z分数（避免极端值影响）。"""
+    x = pd.to_numeric(series, errors='coerce')
+    med = x.median()
+    mad = (x - med).abs().median()
+    eps = 1e-9
+    return 0.6745 * (x - med) / (mad + eps)
+
+def _forward_return_by_seconds(ctx: TradesContext, anchor_ts: pd.Timestamp, forward_seconds: float) -> float:
+    """在成交序列上以锚点时间为起点，计算 forward_seconds 之后的对数收益（若数据不足返回NaN）。"""
+    try:
+        start_ts = anchor_ts
+        end_ts = anchor_ts + pd.Timedelta(seconds=float(max(0.0, forward_seconds)))
+        s, e = ctx.locate(start_ts, end_ts)
+        if e - s <= 1:
+            return np.nan
+        p0 = ctx.price[s] if s < ctx.price.size else np.nan
+        p1 = ctx.price[e - 1] if (e - 1) < ctx.price.size else np.nan
+        if not (np.isfinite(p0) and np.isfinite(p1)) or p0 <= 0 or p1 <= 0:
+            return np.nan
+        return float(np.log(p1 / p0))
+    except Exception:
+        return np.nan
+
+def detect_large_aggressive_buy(
+    trades: pd.DataFrame,
+    X_interval: pd.DataFrame,
+    min_votes: int = 3,
+    ofi_z_thresh: float = 2.0,
+    tail_share_thresh: float = 0.3,
+    gof_volume_thresh: float = 0.2,
+    micro_z_thresh: float = 1.0,
+    confirm_seconds: float = 2.0,
+    confirm_ret_thresh: float = 0.0005,
+) -> pd.DataFrame:
+    """
+    基于已计算的区间特征，识别“大单主动买入”事件。
+
+    返回包含每个样本（bar_id）的事件表：
+      - event_time: 使用 X_interval['prediction_time']（或 'feature_end'）
+      - 条件布尔列与 votes 数
+      - score: 归一化简单得分（votes / 条件数），便于排序
+      - is_large_aggr_buy: 是否满足阈值（含价格事后确认）
+    """
+    if X_interval is None or X_interval.empty:
+        return pd.DataFrame(columns=['bar_id', 'event_time', 'is_large_aggr_buy'])
+
+    X = X_interval.copy()
+    X = X.replace([np.inf, -np.inf], np.nan)
+
+    # 需要的列若不存在则填充NaN，保持稳健
+    for col in [
+        'ofi_roll_sum_max', 'large_tail_dollar_share', 'gof_by_volume',
+        'signed_vwap_deviation', 'vwap_deviation', 'micro_dp_zscore',
+        'micro_dp_short', 'impact_perm_share'
+    ]:
+        if col not in X.columns:
+            X[col] = np.nan
+
+    # ofi z-score（稳健）
+    ofi_z = _robust_zscore(X['ofi_roll_sum_max'])
+
+    cond_ofi = ofi_z >= ofi_z_thresh
+    cond_tail = X['large_tail_dollar_share'] >= tail_share_thresh
+    cond_gof = X['gof_by_volume'] >= gof_volume_thresh
+    cond_vwap = (X['signed_vwap_deviation'] > 0) | (X['vwap_deviation'] > 0)
+    cond_micro = (X['micro_dp_zscore'] >= micro_z_thresh) | (X['micro_dp_short'] > 0)
+    cond_perm = X['impact_perm_share'] > 0
+
+    # 事后价格确认（以交易序列近似mid），在 prediction_time 或 feature_end 之后确认
+    event_time_col = 'prediction_time' if 'prediction_time' in X.columns else ('feature_end' if 'feature_end' in X.columns else None)
+    if event_time_col is None:
+        # 若没有时间信息，只能返回基于特征的条件判断
+        forward_confirm = pd.Series(index=X.index, data=np.nan)
+        cond_confirm = pd.Series(index=X.index, data=False)
+    else:
+        ctx = _build_trades_context(trades)
+        forward_ret = X[event_time_col].apply(lambda t: _forward_return_by_seconds(ctx, pd.to_datetime(t), confirm_seconds))
+        forward_confirm = forward_ret
+        cond_confirm = forward_ret >= np.log(1.0 + confirm_ret_thresh)
+
+    # 计票（不含确认与含确认两套）
+    conditions = pd.DataFrame({
+        'cond_ofi': cond_ofi.fillna(False),
+        'cond_tail': cond_tail.fillna(False),
+        'cond_gof': cond_gof.fillna(False),
+        'cond_vwap': cond_vwap.fillna(False),
+        'cond_micro': cond_micro.fillna(False),
+        'cond_perm': cond_perm.fillna(False),
+    })
+    votes = conditions.sum(axis=1)
+    base_pass = votes >= int(min_votes)
+    final_pass = base_pass & cond_confirm.fillna(False)
+
+    out = pd.DataFrame({
+        'bar_id': X.index,
+        'event_time': X[event_time_col] if event_time_col else pd.NaT,
+        'ofi_z': ofi_z,
+        'cond_ofi': conditions['cond_ofi'],
+        'cond_tail': conditions['cond_tail'],
+        'cond_gof': conditions['cond_gof'],
+        'cond_vwap': conditions['cond_vwap'],
+        'cond_micro': conditions['cond_micro'],
+        'cond_perm': conditions['cond_perm'],
+        'votes': votes.astype(int),
+        'forward_logret': forward_confirm,
+        'is_large_aggr_buy': final_pass,
+    })
+    # 简单分数：票数占比 + 前瞻收益正向奖励
+    total_conds = float(conditions.shape[1])
+    score = votes.astype(float) / max(1.0, total_conds)
+    bonus = np.clip(forward_confirm.fillna(0.0), 0.0, 0.005) * 50.0  # 最高+0.25
+    out['score'] = (score + bonus).astype(float)
+    return out.set_index('bar_id')
 
 def main():    
     start_date = '2025-01-01'
