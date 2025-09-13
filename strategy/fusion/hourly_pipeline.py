@@ -282,10 +282,13 @@ def purged_cv_evaluate(
         Xtr, ytr = X.loc[tr_idx], y.loc[tr_idx]
         Xte, yte = X.loc[te_idx], y.loc[te_idx]
 
-        Xtr.drop(columns=['interval_start', 'interval_end'], inplace=True)
-        Xte.drop(columns=['interval_start', 'interval_end'], inplace=True)
-        ytr.drop(columns=['end_time'], inplace=True)
-        yte.drop(columns=['end_time'], inplace=True)
+        # 安全删除可能存在的时间列
+        drop_cols = [c for c in ['feature_start', 'feature_end', 'prediction_time'] if c in Xtr.columns]
+        if drop_cols:
+            Xtr.drop(columns=drop_cols, inplace=True)
+        drop_cols_te = [c for c in ['feature_start', 'feature_end', 'prediction_time'] if c in Xte.columns]
+        if drop_cols_te:
+            Xte.drop(columns=drop_cols_te, inplace=True)
         if use_scaler:
             scaler = StandardScaler()
             Xtr_scaled = pd.DataFrame(
@@ -1422,11 +1425,15 @@ def make_interval_feature_dataset(
     rolling_windows: Optional[List[int]] = None,
     rolling_stats: Optional[List[str]] = None,
     bar_zip_path :str = None
-) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame]:
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    标签：由 dollar bars 生成的未来 N-bar 对数收益。
+    标签：由 dollar bars 生成的未来 N-bar 对数收益，返回含时间信息的 DataFrame：
+      - y: 标签值
+      - horizon_bars: 预测的未来bar数
+      - t0_time: 标签基准bar的 close 时间（end_time）
+      - tH_time: 未来 horizon_bars 对应 bar 的 close 时间（end_time）
     因子：对齐到对应区间 [start_time, end_time)（过去或未来N个bar）上基于逐笔成交直接计算。
-    返回：X_interval, y, bars
+    返回：X_interval, y_df, bars
     """
 
     bars = None
@@ -1445,8 +1452,15 @@ def make_interval_feature_dataset(
     bars['bar_id'] = bars.index
     close_s = bars.set_index('bar_id')['close']
 
-    # 未来 N-bar 对数收益
-    y = np.log(close_s.shift(-horizon_bars) / close_s)
+    # 未来 N-bar 对数收益 + 时间信息
+    y_series = np.log(close_s.shift(-horizon_bars) / close_s)
+    end_time_s = bars.set_index('bar_id')['end_time']
+    y = pd.DataFrame({
+        'y': y_series,
+        'horizon_bars': int(horizon_bars),
+        't0_time': end_time_s,
+        'tH_time': end_time_s.shift(-horizon_bars),
+    })
 
     # 预构建高性能上下文（一次即可）
     ctx = _build_trades_context(trades)
@@ -1468,14 +1482,16 @@ def make_interval_feature_dataset(
                 features.append({'bar_id': bar_id, '_skip': True})
                 continue
                 
-        start_ts = bars.loc[start_idx, 'start_time']
-        end_ts = bars.loc[end_idx, 'end_time']
-        feat = _compute_interval_trade_features_fast(ctx, start_ts, end_ts)
+        feature_start_ts = bars.loc[start_idx, 'start_time']
+        feature_end_ts = bars.loc[end_idx, 'end_time']
+        feat = _compute_interval_trade_features_fast(ctx, feature_start_ts, feature_end_ts)
         print(idx)
         idx = idx + 1
         feat['bar_id'] = bar_id
-        feat['interval_start'] = start_ts
-        feat['interval_end'] = end_ts
+        feat['feature_start'] = feature_start_ts  # 特征计算区间的开始
+        feat['feature_end'] = feature_end_ts      # 特征计算区间的结束
+        feat['prediction_time'] = bars.loc[bar_id, 'end_time']  # 预测时间点
+        feat['settle_time'] = bars.loc[bar_id + horizon_bars, 'end_time']
         features.append(feat)
 
     X = pd.DataFrame(features).set_index('bar_id')
@@ -1524,19 +1540,22 @@ def run_bar_interval_pipeline(
         bar_zip_path = bar_zip_path
     )
     
-    mask = y.notna() & np.isfinite(y.values)
+    mask = y['y'].notna() & np.isfinite(y['y'].values)
     X = X.loc[mask].replace([np.inf, -np.inf], np.nan)
     y = y.loc[X.index]
+    bars = bars[bars['end_time'].isin(X['feature_end'])]
 
     if X.empty or y.empty:
         return {'error': '数据不足或阈值设置过大，无法构造区间数据集', 'X': X, 'y': y, 'bars': bars}
 
     # 用对应样本的区间结束时间作为索引
     # 若为 past 模式：使用当前锚点 bar 的 end_time 代表预测时点
-    end_times = bars.set_index('bar_id')['end_time']
-    idx_time = pd.to_datetime(end_times.loc[X.index])
-    X2 = X.copy(); X2.index = idx_time
-    y2 = y.copy(); y2.index = idx_time
+    # end_times = bars.set_index('bar_id')['feature_end']
+    # idx_time = pd.to_datetime(end_times.loc[X.index])
+    X2 = X.copy(); 
+    # X2.index = idx_time
+    y2 = y.copy(); 
+    # y2.index = idx_time
 
     # embargo 转换为时间长度
     durations = (bars['end_time'] - bars['start_time']).dropna()
@@ -1558,7 +1577,7 @@ def run_bar_interval_pipeline(
     )
     eval_result = purged_cv_evaluate(
         X=X2,
-        y=y2,
+        y=y2['y'],
         n_splits=n_splits,
         embargo=embargo_td,
         model_type=model_type,
