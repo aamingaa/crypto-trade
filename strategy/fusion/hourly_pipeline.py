@@ -863,7 +863,7 @@ def make_interval_feature_dataset(
     close_s = bars.set_index('bar_id')['close']
 
     # 未来 N-bar 对数收益 + 时间信息
-    y_series = np.log(close_s.shift(-horizon_bars) / close_s)
+    y_series = np.log(close_s.shift(-horizon_bars) / close_s.shift(-1))
     end_time_s = bars.set_index('bar_id')['end_time']
     y = pd.DataFrame({
         'y': y_series,
