@@ -664,19 +664,35 @@ def _fast_price_impact_metrics(ctx: TradesContext, s: int, e: int) -> Dict[str, 
     if e - s < 3:
         return {}
     r = np.diff(ctx.logp[s:e])                # 长度 K-1
-    sdollar = ctx.sign[s:e] * ctx.quote[s:e]  # 长度 K
-    x = sdollar[1:]                           # 与 r 对齐
-    y = r
+    # 计算Kyle λ：价格冲击系数，衡量订单流对价格的影响程度
+    # 公式：Kyleλ = cov(Δlogp, signed_dollar) / var(signed_dollar)
+    # signed_dollar（带符号的交易金额）：反映订单流方向和规模（正数表示买入，负数表示卖出，绝对值为交易金额）。
+    # Δlogp（对数价格变化）：反映价格的变动幅度（用对数差分可近似收益率，避免价格绝对值影响）。
+    # 这个公式的本质是：通过计算 “订单流（signed_dollar）与价格变化（Δlogp）的相关性”，除以 “订单流自身的波动”，得到 “单位订单流对价格的边际影响”
+    sdollar = ctx.sign[s:e] * ctx.quote[s:e]
+    x = sdollar[1:] 
+    # y = r
     varx = float(np.var(x))
-    kyle = float(np.cov(x, y, ddof=1)[0, 1] / varx) if varx > 0 else np.nan
-
+    kyle = float(np.cov(x, r, ddof=1)[0, 1] / varx) if varx > 0 else np.nan
+    
+    # 计算Amihud λ：非流动性指标，值越大表示流动性越差
+    # 公式：Amihudλ = mean(|Δlogp| / 交易金额)
+    # 确保交易金额都为正数（避免除零错误）
+    # 当 Amihud 值越大，说明相同规模的交易（如 100 万元的买入或卖出）会引发更大的价格波动，意味着市场 “吸收交易的能力弱”，流动性更差（非流动性更高）。
     amihud = float((np.abs(r) / (ctx.quote[s+1:e])).mean()) if np.all(ctx.quote[s+1:e] > 0) else np.nan
-
+    # 计算Hasbrouck λ：价格冲击系数，衡量订单流对价格的影响程度
+    # Hasbrouck 的研究核心是将价格冲击分解为 “永久冲击”（由信息驱动，影响长期价格）和 “暂时冲击”（由流动性需求驱动，短期会逆转）。简化版的 Hasbrouck λ 更侧重整体冲击强度，其设计有两个关键考虑：
+    # 非线性关系：大额交易的边际价格冲击通常会递减（比如 1000 万交易的冲击可能远小于 10 个 100 万交易的总和），用平方根转换能更好地拟合这种特征。
+    # 信息含量：该指标更敏感于交易中的 “信息成分”—— 如果一笔交易包含新信息（如基本面变化），Hasbrouck λ 会更显著地反映其对价格的影响。
+    # 与 Kyleλ：Kyleλ 用原始交易金额衡量线性冲击，而 Hasbrouck λ 用平方根捕捉非线性冲击，更贴近实际市场中 “规模越大、边际冲击越弱” 的特征。
+    # 与 Amihud：Amihud 是 “价格波动绝对值 / 交易金额” 的均值，侧重 “平均冲击成本”；而 Hasbrouck λ 通过协方差计算，更侧重 “系统性的冲击敏感度”，且包含了价格变动方向的信息。
+    # 通过平方根转换捕捉交易规模与价格冲击之间的非线性关系（实证中发现，价格冲击随交易规模增长的速度往往慢于线性关系，用平方根更贴合实际）。 
     xh = np.sign(r) * np.sqrt(ctx.quote[s+1:e])
     varxh = float(np.var(xh))
     hasb = float(np.cov(xh, r, ddof=1)[0, 1] / varxh) if varxh > 0 and len(r) > 1 else np.nan
 
     # 半衰期
+    # 这段代码用于计算价格冲击的半衰期（impact half-life），核心是通过分析价格冲击序列的一阶自相关性，衡量价格冲击的 “持续性”—— 即价格受到冲击后，需要多久才能衰减到初始强度的一半。以下是逐部分的详细解释：
     r0 = r[:-1] - np.mean(r[:-1])
     r1 = r[1:] - np.mean(r[1:])
     denom = np.sqrt(np.sum(r0**2) * np.sum(r1**2))
@@ -687,9 +703,12 @@ def _fast_price_impact_metrics(ctx: TradesContext, s: int, e: int) -> Dict[str, 
         t_half = np.nan
 
     # 冲击占比
+    # 这段代码的核心功能是计算价格冲击的 “永久成分” 与 “暂时成分” 占比—— 通过分析一段区间内的价格变动，区分 “长期留存的价格变化（永久冲击）” 和 “短期波动后逆转的价格变化（暂时冲击）”，是市场微观结构中判断价格变动驱动因素（信息 vs 流动性）的关键逻辑。
     dp = np.diff(ctx.price[s:e])
+    # 总价格波动的绝对值之和
     denom2 = float(np.sum(np.abs(dp)))
     if denom2 > 0:
+        # 计算永久冲击占比
         perm = float(np.abs(ctx.price[e-1] - ctx.price[s]) / denom2)
         perm = float(np.clip(perm, 0.0, 1.0))
         trans = float(1.0 - perm)
@@ -793,20 +812,24 @@ def _fast_hawkes_clustering(ctx: TradesContext, s: int, e: int) -> Dict[str, flo
     size_mean = float(np.mean(clusters)) if clusters else np.nan
     size_max = float(np.max(clusters)) if clusters else 0.0
     degree = size_mean / float(e - s) if clusters else np.nan
+    # 霍克斯过程（Hawkes Process）是一种 “自激发的点过程”，核心假设是：一个事件（如一笔交易）的发生，会提高短期内另一事件发生的概率（即 “交易引发更多交易”），最终导致事件在时间上呈现 “聚类特征”（密集时段与稀疏时段交替）。
+
+    # 这段代码正是通过 “时间间隔阈值” 捕捉这种特征 —— 交易间隔小（触发后续交易）的归为同一聚类，间隔大（无触发）的划分为新聚类，完美契合霍克斯过程的 “自激发” 逻辑，因此命名为 “hawkes_clustering”。
     return {
-        'hawkes_cluster_count': float(len(clusters)),
-        'hawkes_cluster_size_mean': size_mean,
-        'hawkes_cluster_size_max': size_max,
-        'hawkes_clustering_degree': float(degree) if pd.notna(degree) else np.nan,
+        'hawkes_cluster_count': float(len(clusters)), #交易被划分为的 “密集时段数量”	
+        'hawkes_cluster_size_mean': size_mean, #每个密集时段的平均交易数（越大，整体交易越密集）	
+        'hawkes_cluster_size_max': size_max, #最密集时段的交易数（反映 “交易高峰” 的强度）	
+        'hawkes_clustering_degree': float(degree) if pd.notna(degree) else np.nan, #平均聚类大小 / 总交易数（取值 [0,1]，越接近 1，交易越集中）	
     }
 
-
+# 若两个相关性指标均为正且显著，说明当前价格上涨是 “真买盘推动”（而非虚涨），持续性可能更强；若相关性低，则需警惕价格波动的虚假性。
 def _fast_cum_signed_flow_price_corr(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
     if e - s <= 2:
         return {'corr_cumsum_signed_qty_logp': np.nan, 'corr_cumsum_signed_dollar_logp': np.nan}
     # 累计相对序列
     logp_rel = ctx.logp[s:e] - ctx.logp[s]
     cs_signed_qty = (ctx.csum_signed_qty[s:e] - (ctx.csum_signed_qty[s] if s < ctx.csum_signed_qty.size else 0.0))
+    # 累计有符号交易金额序列：反映区间内净买入/卖出的金额压力
     cs_signed_dollar = (ctx.csum_signed_quote[s:e] - (ctx.csum_signed_quote[s] if s < ctx.csum_signed_quote.size else 0.0))
     def _corr(a: np.ndarray, b: np.ndarray) -> float:
         if a.size != b.size or a.size < 3:
