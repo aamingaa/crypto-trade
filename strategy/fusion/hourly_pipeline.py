@@ -634,10 +634,10 @@ def _compute_interval_trade_features_fast(
                     'large_tail_dollar_mean': mean_large,
                 }
     # 大单买卖方向性（分位阈值列表）
-    # out_tail_dir = {}
-    # if cfg.get('tail_directional', False) and (e - s) > 0:
-    #     q_list = tail_q_list or [0.9, 0.95]
-    #     out_tail_dir = _fast_large_trade_tail_directional(ctx, s, e, q_list)
+    out_tail_dir = {}
+    if cfg.get('tail_directional', False) and (e - s) > 0:
+        q_list = tail_q_list or [0.9, 0.95]
+        out_tail_dir = _fast_large_trade_tail_directional(ctx, s, e, q_list)
     out = {}
     out.update(base)
     out.update(out_impact)
@@ -647,7 +647,7 @@ def _compute_interval_trade_features_fast(
     out.update(out_ofi)
     out.update(out_hawkes)
     out.update(out_tail)
-    # out.update(out_tail_dir)
+    out.update(out_tail_dir)
     return out
 
 
@@ -724,6 +724,95 @@ def _fast_price_impact_metrics(ctx: TradesContext, s: int, e: int) -> Dict[str, 
         'impact_perm_share': perm,
         'impact_transient_share': trans,
     }
+
+
+def _fast_large_trade_tail_directional(
+    ctx: TradesContext,
+    s: int,
+    e: int,
+    q_list: List[float],
+) -> Dict[str, float]:
+    """
+    方向性大单指标（按成交额分位阈值）：
+      - 对每个 q ∈ q_list，取阈值 thr_q = quantile(quote, q)
+      - 统计：大单买/卖成交额与笔数、占比、方向不平衡（LTI）、单位时间净额
+    输出：包含每个 q 的后缀（如 _q95），并提供一个主口径（取最大 q）。
+    """
+    if e - s <= 0:
+        return {}
+    dv = ctx.quote[s:e]
+    if dv.size == 0:
+        return {}
+    sign = ctx.sign[s:e]
+    eps = 1e-12
+    total_dollar = float(dv.sum()) if np.isfinite(dv.sum()) else 0.0
+    # 区间时长（秒）
+    duration_seconds = max(1.0, float((ctx.t_ns[e - 1] - ctx.t_ns[s]) / 1e9))
+
+    # 统一将 q 转换为标签（如 0.95 → q95）
+    def _qtag(q: float) -> str:
+        return f"q{int(round(q * 100))}"
+
+    out: Dict[str, float] = {}
+    q_list_sorted = sorted([q for q in q_list if 0.0 < q < 1.0])
+    if not q_list_sorted:
+        q_list_sorted = [0.95]
+
+    last_q = q_list_sorted[-1]
+    thr_last = float(np.quantile(dv, last_q)) if np.isfinite(dv).all() else np.nan
+    # 主口径使用最大分位
+    for q in q_list_sorted:
+        thr = float(np.quantile(dv, q)) if np.isfinite(dv).all() else np.nan
+        if not np.isfinite(thr) or thr <= 0:
+            continue
+        mask = dv >= thr
+        if not mask.any():
+            # 输出0/NaN以保持列齐全
+            tag = _qtag(q)
+            out.update({
+                f'large_{tag}_buy_dollar_sum': 0.0,
+                f'large_{tag}_sell_dollar_sum': 0.0,
+                f'large_{tag}_buy_count': 0.0,
+                f'large_{tag}_sell_count': 0.0,
+                f'large_{tag}_dollar_share': np.nan if total_dollar <= 0 else 0.0,
+                f'large_{tag}_lti': np.nan,
+                f'large_{tag}_signed_dollar_ps': 0.0,
+            })
+            continue
+        sd = sign[mask] * dv[mask]
+        buy_dollar = float(dv[mask][sign[mask] > 0].sum())
+        sell_dollar = float(dv[mask][sign[mask] < 0].sum())
+        buy_count = float(np.count_nonzero(sign[mask] > 0))
+        sell_count = float(np.count_nonzero(sign[mask] < 0))
+        large_dollar_sum = float(dv[mask].sum())
+        large_signed_dollar_sum = float(sd.sum())
+        lti = (buy_dollar - sell_dollar) / (buy_dollar + sell_dollar + eps)
+        dollar_share = large_dollar_sum / (total_dollar + eps) if total_dollar > 0 else np.nan
+        ps = large_signed_dollar_sum / duration_seconds
+
+        tag = _qtag(q)
+        out.update({
+            f'large_{tag}_buy_dollar_sum': buy_dollar,
+            f'large_{tag}_sell_dollar_sum': sell_dollar,
+            f'large_{tag}_buy_count': buy_count,
+            f'large_{tag}_sell_count': sell_count,
+            f'large_{tag}_dollar_share': dollar_share,
+            f'large_{tag}_lti': lti,
+            f'large_{tag}_signed_dollar_ps': ps,
+        })
+
+    # 若主口径有效，复制到无后缀的简洁列，便于下游使用
+    tag_last = _qtag(last_q)
+    key_base = f'large_{tag_last}'
+    for k in [
+        'buy_dollar_sum', 'sell_dollar_sum', 'buy_count', 'sell_count',
+        'dollar_share', 'lti', 'signed_dollar_ps'
+    ]:
+        src = f'{key_base}_{k}'
+        if src in out:
+            out[f'large_{k}'] = out[src]
+
+    return out
 
 
 def _fast_run_length_metrics(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
