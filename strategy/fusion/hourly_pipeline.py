@@ -636,7 +636,7 @@ def _compute_interval_trade_features_fast(
     # 大单买卖方向性（分位阈值列表）
     out_tail_dir = {}
     if cfg.get('tail_directional', False) and (e - s) > 0:
-        q_list = tail_q_list or [0.9, 0.95]
+        q_list = [0.9, 0.95]
         out_tail_dir = _fast_large_trade_tail_directional(ctx, s, e, q_list)
     out = {}
     out.update(base)
@@ -779,15 +779,25 @@ def _fast_large_trade_tail_directional(
                 f'large_{tag}_signed_dollar_ps': 0.0,
             })
             continue
+        
         sd = sign[mask] * dv[mask]
+        # 大单买成交额
         buy_dollar = float(dv[mask][sign[mask] > 0].sum())
+        # 大单卖成交额
         sell_dollar = float(dv[mask][sign[mask] < 0].sum())
+        # 大单买笔数
         buy_count = float(np.count_nonzero(sign[mask] > 0))
+        # 大单卖笔数
         sell_count = float(np.count_nonzero(sign[mask] < 0))
+         # 大单金额
         large_dollar_sum = float(dv[mask].sum())
+        # 大单成交额
         large_signed_dollar_sum = float(sd.sum())
+        # 大单不平衡
         lti = (buy_dollar - sell_dollar) / (buy_dollar + sell_dollar + eps)
+        # 大单成交额占区间总额
         dollar_share = large_dollar_sum / (total_dollar + eps) if total_dollar > 0 else np.nan
+        # large_qXX_signed_dollar_ps
         ps = large_signed_dollar_sum / duration_seconds
 
         tag = _qtag(q)
