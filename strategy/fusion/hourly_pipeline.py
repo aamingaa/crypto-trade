@@ -423,6 +423,7 @@ class TradesContext:
         self.ret2 = np.r_[0.0, self.ret ** 2]
         # |r_t||r_{t-1}| 对齐成与 price 同长（首位补0）
         abs_r = np.abs(self.ret)
+        self.abs_r = np.r_[0.0, abs_r]
         bp_core = np.r_[0.0, np.r_[0.0, abs_r[1:] * abs_r[:-1]]]  # 与 price 对齐
 
         # 前缀和（与 price 同长）
@@ -432,6 +433,7 @@ class TradesContext:
         self.csum_signed_quote = np.cumsum(self.sign * self.quote)
         self.csum_pxqty = np.cumsum(self.price * self.qty)
         self.csum_ret2 = np.cumsum(self.ret2)
+        self.csum_abs_r = np.cumsum(self.abs_r)
         self.csum_bpv = np.cumsum(bp_core)
 
     def locate(self, start_ts: pd.Timestamp, end_ts: pd.Timestamp) -> Tuple[int, int]:
