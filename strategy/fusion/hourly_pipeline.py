@@ -126,6 +126,7 @@ def build_dollar_bars(
     df['bar_id'] = bar_ids
     df['trades'] = df['bar_id'].map(bar_trade_counts)  # 关键修复：通过map对齐
 
+    df = df.reset_index().rename(columns={'index': 'original_index'})
     # 分组聚合
     agg = {
         'time': ['first', 'last'],
@@ -134,8 +135,10 @@ def build_dollar_bars(
         'quote_qty': 'sum',
         'buy_qty': 'sum',
         'sell_qty': 'sum',
-        'trades': 'first' 
+        'trades': 'first',
+        'original_index': ['first', 'last']
     }
+    
     g = df.groupby('bar_id', sort=True).agg(agg)
     
     # 展平列名
@@ -143,8 +146,11 @@ def build_dollar_bars(
         'start_time', 'end_time',
         'open', 'high', 'low', 'close',
         'volume', 'dollar_value',
-        'buy_volume', 'sell_volume','trades'
+        'buy_volume', 'sell_volume',
+        'trades','start_trade_idx', 
+        'end_trade_idx'
     ]
+    
     
     # 仅过滤最后一个可能不完整的bar（若其成交额不足阈值）
     if not g.empty and g.iloc[-1]['dollar_value'] < dollar_threshold:
@@ -255,7 +261,7 @@ def purged_cv_evaluate(
     random_state: int = 42,
     fee_rate: float = 1e-4,
     annualize: bool = True,
-    period_seconds: Optional[float] = None,
+    period_seconds: Optional[List[float]] = [5],
     seconds_per_year: float = 365.0 * 24.0 * 3600.0,
 ) -> Dict:
     """
@@ -317,15 +323,15 @@ def purged_cv_evaluate(
         turnover = pos.diff().abs().fillna(np.abs(pos.iloc[0]))
         ret_net = ret_gross - fee_rate * turnover
         sharpe_net = float(ret_net.mean() / ret_net.std()) if ret_net.std() > 0 else np.nan
-        if annualize and pd.notna(sharpe_net):
-            ps = float(period_seconds) if (period_seconds is not None and period_seconds > 0) else np.nan
-            if np.isfinite(ps) and ps > 0:
-                ann_factor = np.sqrt(seconds_per_year / ps)
-                sharpe_net_ann = float(sharpe_net * ann_factor)
-            else:
-                sharpe_net_ann = np.nan
-        else:
-            sharpe_net_ann = np.nan
+        # if annualize and pd.notna(sharpe_net):
+        #     ps = float(period_seconds) if (period_seconds is not None and period_seconds > 0) else np.nan
+        #     if np.isfinite(ps) and ps > 0:
+        #         ann_factor = np.sqrt(seconds_per_year / ps)
+        #         sharpe_net_ann = float(sharpe_net * ann_factor)
+        #     else:
+        #         sharpe_net_ann = np.nan
+        # else:
+        #     sharpe_net_ann = np.nan
 
         plot_predictions_vs_truth(yhat, yte, save_path = '/Users/aming/project/python/crypto-trade/strategy/fusion/pic/')
 
@@ -339,7 +345,7 @@ def purged_cv_evaluate(
             'ret_net_mean': float(ret_net.mean()),
             'ret_net_std': float(ret_net.std()) if ret_net.std() > 0 else np.nan,
             'sharpe_net': sharpe_net,
-            'sharpe_net_ann': sharpe_net_ann,
+            # 'sharpe_net_ann': sharpe_net_ann,
             'fee_rate': float(fee_rate),
             'n_train': int(len(Xtr)),
             'n_test': int(len(Xte)),
@@ -462,17 +468,17 @@ def _sum_range(prefix: np.ndarray, s: int, e: int) -> float:
 
 def _default_features_config() -> Dict[str, bool]:
     return {
-        'base': True,                   # 基础汇总/VWAP/强度/买量占比
+        'base': False,                   # 基础汇总/VWAP/强度/买量占比
         'order_flow': True,             # GOF/签名不平衡
-        'price_impact': True,           # Kyle/Amihud/Hasbrouck/半衰期/占比
-        'volatility_noise': True,       # RV/BPV/Jump/微动量/均值回复/高低幅比
-        'arrival_stats': True,          # 到达间隔统计
-        'run_markov': True,             # run-length/Markov/翻转率
-        'rolling_ofi': True,            # 滚动OFI
-        'hawkes': True,                 # 聚簇（Hawkes近似）
-        'path_shape': True,             # 协动相关/VWAP偏离
-        'tail': True,                   # 大单尾部比例
-        'tail_directional': True,       # 大单买卖方向性（分位阈值法）
+        'price_impact': False,           # Kyle/Amihud/Hasbrouck/半衰期/占比
+        'volatility_noise': False,       # RV/BPV/Jump/微动量/均值回复/高低幅比
+        'arrival_stats': False,          # 到达间隔统计
+        'run_markov': False,             # run-length/Markov/翻转率
+        'rolling_ofi': False,            # 滚动OFI
+        'hawkes': False,                 # 聚簇（Hawkes近似）
+        'path_shape': False,             # 协动相关/VWAP偏离
+        'tail': False,                   # 大单尾部比例
+        'tail_directional': False,       # 大单买卖方向性（分位阈值法）
     }
 
 
@@ -482,9 +488,12 @@ def _compute_interval_trade_features_fast(
     end_ts: pd.Timestamp,
     features_config: Optional[Dict[str, bool]] = None,
     tail_q: float = 0.9,
-    tail_q_list: Optional[List[float]] = None,
+    bars: pd.DataFrame = None,
+    bar_window_start_idx: int = None,
+    bar_window_end_idx: int = None # 这里是下一个bar的idx
 ) -> Dict[str, float]:
-    s, e = ctx.locate(start_ts, end_ts)
+    # s, e = ctx.locate(start_ts, end_ts)
+    s, e = bars.loc[bar_window_start_idx, 'start_trade_idx'], bars.loc[bar_window_end_idx, 'end_trade_idx'] + 1
     if e - s <= 0:
         return {}
 
@@ -951,7 +960,7 @@ def make_interval_feature_dataset(
     trades: pd.DataFrame,
     dollar_threshold: float,
     feature_window_bars: int = 10,
-    horizon_bars: int = 3,
+    horizon_bars: Optional[List[int]] = [5],
     window_mode: str = 'past',  # 'past' 使用过去N个bar的[start,end)，'future' 使用未来N个bar（注意可能泄露）
     add_lags: int = 0,
     rolling_windows: Optional[List[int]] = None,
@@ -987,49 +996,61 @@ def make_interval_feature_dataset(
     close_s = bars.set_index('bar_id')['close']
 
     # 未来 N-bar 对数收益 + 时间信息
-    y_series = np.log(close_s.shift(-horizon_bars) / close_s.shift(-1))
+    # y_series = np.log(close_s.shift(-horizon_bars) / close_s.shift(-1))
     end_time_s = bars.set_index('bar_id')['end_time']
-    y = pd.DataFrame({
-        'y': y_series,
-        'horizon_bars': int(horizon_bars),
-        't0_time': end_time_s,
-        'tH_time': end_time_s.shift(-horizon_bars),
-    })
+    y = pd.DataFrame(index=close_s.index)
+    # y = pd.DataFrame({
+    #     'y': y_series,
+    #     'horizon_bars': int(horizon_bars),
+    #     't0_time': end_time_s,
+    #     'tH_time': end_time_s.shift(-horizon_bars),
+    # })
+
+    for horizon in horizon_bars: 
+        y_series_log_return = np.log(close_s.shift(-horizon) / close_s)
+        tH_time = end_time_s.shift(-horizon)
+        y[f'log_return_{horizon}'] = y_series_log_return
+        y[f't0_time_{horizon}'] = end_time_s  # 起始时间（同一时间点对不同持有期相同）
+        y[f'tH_time_{horizon}'] = tH_time
+        
 
     # 预构建高性能上下文（一次即可）
     ctx = _build_trades_context(trades)
 
     # 计算每个样本的区间
     features = []
+    record = []
     idx = 1
     for bar_id in close_s.index:
-        if window_mode == 'past':
-            start_idx = bar_id - feature_window_bars
-            end_idx = bar_id - 1
-            if start_idx < 0:
+         if window_mode == 'past':
+            bar_window_start_idx = bar_id - feature_window_bars
+            if bar_window_start_idx < 0:
                 features.append({'bar_id': bar_id, '_skip': True})
                 continue
-        else:  # future 区间（注意信息泄露，仅在需要时使用）
-            start_idx = bar_id
-            end_idx = bar_id + feature_window_bars - 1
-            if end_idx >= len(bars):
-                features.append({'bar_id': bar_id, '_skip': True})
-                continue
-                
-        feature_start_ts = bars.loc[start_idx, 'start_time']
-        feature_end_ts = bars.loc[end_idx, 'end_time']
-        feat = _compute_interval_trade_features_fast(ctx, feature_start_ts, feature_end_ts)
-        print(idx)
-        idx = idx + 1
-        feat['bar_id'] = bar_id
-        feat['feature_start'] = feature_start_ts  # 特征计算区间的开始
-        feat['feature_end'] = feature_end_ts      # 特征计算区间的结束
-        feat['prediction_time'] = bars.loc[bar_id, 'end_time']  # 预测时间点
-        if bar_id + horizon_bars < len(bars) :
-            feat['settle_time'] = bars.loc[bar_id + horizon_bars, 'end_time']
-        else:
-             feat['settle_time'] = np.nan
-        features.append(feat)
+            bar_window_end_idx = bar_id - 1
+            record.append({
+                'bar_id': bar_id,
+                'bar_window_start_idx': bar_window_start_idx,
+                'bar_window_end_idx': bar_window_end_idx,
+                'horizon_bar_idx': bar_id + horizon_bars[-1]
+            })
+
+            feature_start_ts = bars.loc[bar_window_start_idx, 'start_time']
+            feature_end_ts = bars.loc[bar_window_end_idx, 'end_time']
+            feat = _compute_interval_trade_features_fast(ctx=ctx, start_ts=feature_start_ts, end_ts=feature_end_ts, bars=bars, bar_window_start_idx=bar_window_start_idx, bar_window_end_idx=bar_window_end_idx)
+            if idx % 50 == 0:
+                print(f'idx={idx}, total={len(close_s.index)}')
+            idx = idx + 1
+            feat['bar_id'] = bar_id
+            feat['feature_start'] = feature_start_ts  # 特征计算区间的开始
+            feat['feature_end'] = feature_end_ts      # 特征计算区间的结束
+            feat['prediction_time'] = bars.loc[bar_id, 'end_time']  # 预测时间点
+            for horizon in horizon_bars:
+                if bar_id + horizon < len(bars) :
+                    feat[f'settle_time_{horizon}'] = bars.loc[bar_id + horizon, 'end_time']
+                else:
+                    feat[f'settle_time_{horizon}'] = np.nan
+            features.append(feat)
 
     X = pd.DataFrame(features).set_index('bar_id')
     if '_skip' in X.columns:
@@ -1056,7 +1077,7 @@ def run_bar_interval_pipeline(
     trades: pd.DataFrame,
     dollar_threshold: float,
     feature_window_bars: int = 10,
-    horizon_bars: int = 3,
+    horizon_bars: Optional[List[int]] = [5],
     window_mode: str = 'past',
     n_splits: int = 5,
     embargo_bars: Optional[int] = None,
@@ -1077,9 +1098,15 @@ def run_bar_interval_pipeline(
         bar_zip_path = bar_zip_path
     )
     
-    mask = y['y'].notna() & np.isfinite(y['y'].values)
+    # mask = y['y'].notna() & np.isfinite(y['y'].values)
+    # X = X.loc[mask].replace([np.inf, -np.inf], np.nan)
+    # y = y.loc[X.index]
+
+    mask = y[f'log_return_{horizon_bars[-1]}'].notna() & np.isfinite(y[f'log_return_{horizon_bars[-1]}'].values)
     X = X.loc[mask].replace([np.inf, -np.inf], np.nan)
     y = y.loc[X.index]
+
+
     bars = bars[bars['end_time'].isin(X['feature_end'])]
 
     if X.empty or y.empty:
@@ -1107,14 +1134,20 @@ def run_bar_interval_pipeline(
 
     # 传入期长：使用 dollar bar 的中位秒数，便于年化换算
     # 单期收益对应的是 horizon_bars 根 bar 的窗口
-    period_seconds = (
-        float(median_duration.total_seconds() * max(1, horizon_bars))
-        if median_duration is not None
-        else None
-    )
+    period_seconds = []
+    for horizon in horizon_bars:
+        sesconds = (
+            float(median_duration.total_seconds() * max(1, horizon)) if median_duration is not None else None
+        )
+        period_seconds.append(sesconds)
+    filtered_X_cols = [col for col in X.columns  if 'settle' not in col and 'start' not in col and 'end' not in col and 'time' not in col]
+    X3 = X2[filtered_X_cols]
+
+    filtered_y_cols = [col for col in y2.columns  if 'time' not in col]
+    y3 = y2[filtered_y_cols]
     eval_result = purged_cv_evaluate(
-        X=X2,
-        y=y2['y'],
+        X=X3,
+        y=y3[f'log_return_{5}'],
         n_splits=n_splits,
         embargo=embargo_td,
         model_type=model_type,
@@ -1321,7 +1354,7 @@ def detect_large_aggressive_buy(
 
 def main():    
     start_date = '2025-01-01'
-    end_date = '2025-01-30'
+    end_date = '2025-01-02'
     dollar_threshold=10000*6000
     dollar_threshold_str = str(dollar_threshold).replace("*", "_")
 
@@ -1353,7 +1386,7 @@ def main():
         trades=trades_df,
         dollar_threshold=dollar_threshold,
         feature_window_bars=10,
-        horizon_bars=3,
+        horizon_bars=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
         window_mode='past',
         n_splits=5,
         embargo_bars=None,
