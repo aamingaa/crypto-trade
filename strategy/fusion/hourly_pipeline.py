@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple, Optional
 import warnings
 import os
 
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
@@ -103,23 +103,106 @@ def build_dollar_bars(
     df['buy_qty'] = df['qty'].where(df['trade_sign'] > 0, 0.0)
     df['sell_qty'] = df['qty'].where(df['trade_sign'] < 0, 0.0)
     
-    # 核心改进：逐笔计算bar_id，确保连续递增
+    # 核心改进：逐笔计算bar_id，确保连续递增，并在单次遍历内累积 bar 级指标
+    # 思路：
+    # 1) 用累计成交额达到阈值时“结算”一个 bar，当前交易仍计入该 bar。
+    # 2) 在 bar 内用对数价格增量累积 rv、用相邻 |r| 的乘积累积 bpv，避免二次遍历。
+    # 3) 同步累计成交量、带符号的成交量/成交额、价格*数量之和以便计算 vwap。
     cumulative = 0.0  # 累积成交额
     bar_id = 0        # 当前bar_id
     bar_ids = []      # 存储每个交易的bar_id
-    bar_trade_counts={}
+    bar_trade_counts = {}
 
-    for qty in df['quote_qty']:
-        cumulative += qty
+    # per-bar 累积器（在 bar 结算时写入 metrics 字典）
+    per_bar_metrics = {}
+    curr_sum_qty = 0.0
+    curr_sum_signed_qty = 0.0
+    curr_sum_quote = 0.0
+    curr_sum_signed_quote = 0.0
+    curr_sum_pxqty = 0.0
+    curr_rv = 0.0
+    curr_bpv = 0.0
+    curr_abs_r_sum = 0.0
+    prev_logp_in_bar = None
+    prev_abs_r_in_bar = None
+    curr_trades = 0
+    bar_start_time = None
+    bar_start_idx = None
+
+    prices = df['price'].to_numpy(dtype=float)
+    qtys = df['qty'].to_numpy(dtype=float)
+    quotes = df['quote_qty'].to_numpy(dtype=float)
+    signs = np.where(df['is_buyer_maker'].to_numpy(), -1.0, 1.0)
+    times = pd.to_datetime(df['time']).to_numpy()
+
+    for i, (q_quote, q_qty, p, sgn, t) in enumerate(zip(quotes, qtys, prices, signs, times)):
+        logp = float(np.log(p)) if p > 0 else np.nan
+
+        # 初始化当前 bar 的起点信息
+        if curr_trades == 0:
+            bar_start_time = pd.Timestamp(t)
+            bar_start_idx = i
+
+        # 累积交易级指标
+        # r 为对数收益增量；rv = Σ r^2；bpv 近似 = Σ |r_t||r_{t-1}|；abs_return_sum = Σ |r|
+        if prev_logp_in_bar is not None and np.isfinite(logp):
+            r = logp - prev_logp_in_bar
+            abs_r = abs(r)
+            curr_rv += r * r
+            if prev_abs_r_in_bar is not None:
+                curr_bpv += prev_abs_r_in_bar * abs_r
+            curr_abs_r_sum += abs_r
+            prev_abs_r_in_bar = abs_r
+        prev_logp_in_bar = logp if np.isfinite(logp) else prev_logp_in_bar
+
+        curr_sum_qty += float(q_qty)
+        curr_sum_signed_qty += float(sgn * q_qty)
+        curr_sum_quote += float(q_quote)
+        curr_sum_signed_quote += float(sgn * q_quote)
+        curr_sum_pxqty += float(p * q_qty)
+        curr_trades += 1
+
+        cumulative += q_quote
         bar_trade_counts[bar_id] = bar_trade_counts.get(bar_id, 0) + 1
-        # 当累积成交额达到阈值时，当前交易仍属于当前bar_id，随后bar_id递增并重置累积
+        bar_ids.append(bar_id)
+
+        # 结算 bar（当前交易仍属于当前 bar）
         if cumulative >= dollar_threshold:
-            bar_ids.append(bar_id)
-            # 重置累积（保留超额部分，用于下一个bar的计算）
+            bar_end_time = pd.Timestamp(t)
+            bar_end_idx = i
+            duration_sec = max(1.0, (bar_end_time - bar_start_time).total_seconds())
+            vwap = (curr_sum_pxqty / curr_sum_qty) if curr_sum_qty > 0 else np.nan
+            per_bar_metrics[bar_id] = {
+                'signed_volume': curr_sum_signed_qty,
+                'signed_dollar': curr_sum_signed_quote,
+                'pxqty_sum': curr_sum_pxqty,
+                'vwap': vwap,
+                'rv': curr_rv,
+                'bpv': curr_bpv,
+                'jump_rv_bpv': max(curr_rv - curr_bpv, 0.0) if np.isfinite(curr_rv) and np.isfinite(curr_bpv) else np.nan,
+                'abs_return_sum': curr_abs_r_sum,
+                'bar_duration_sec': duration_sec,
+                'intensity': float(curr_trades) / duration_sec if duration_sec > 0 else np.nan,
+                'start_trade_idx': bar_start_idx,
+                'end_trade_idx': bar_end_idx,
+            }
+
+            # 为下一个 bar 重置累积器
             cumulative -= dollar_threshold
             bar_id += 1
-        else:
-            bar_ids.append(bar_id)
+            curr_sum_qty = 0.0
+            curr_sum_signed_qty = 0.0
+            curr_sum_quote = 0.0
+            curr_sum_signed_quote = 0.0
+            curr_sum_pxqty = 0.0
+            curr_rv = 0.0
+            curr_bpv = 0.0
+            curr_abs_r_sum = 0.0
+            prev_logp_in_bar = None
+            prev_abs_r_in_bar = None
+            curr_trades = 0
+            bar_start_time = None
+            bar_start_idx = None
     
     
     
@@ -150,6 +233,16 @@ def build_dollar_bars(
         'trades','start_trade_idx', 
         'end_trade_idx'
     ]
+    
+    # 合并单次遍历累积得到的 per-bar 指标
+    if len(per_bar_metrics) > 0:
+        metrics_df = pd.DataFrame.from_dict(per_bar_metrics, orient='index')
+        # 只合并新增指标，避免覆盖 groupby 的 start/end_trade_idx
+        cols_to_join = [c for c in [
+            'signed_volume','signed_dollar','pxqty_sum','vwap','rv','bpv','jump_rv_bpv','abs_return_sum','bar_duration_sec','intensity'
+        ] if c in metrics_df.columns]
+        g = g.join(metrics_df[cols_to_join], how='left')
+    
     
     
     # 仅过滤最后一个可能不完整的bar（若其成交额不足阈值）
@@ -252,11 +345,62 @@ def _time_splits_purged(
     return out
 
 
+def _bar_splits_purged(
+    idx: pd.DatetimeIndex,
+    n_splits: int = 5,
+    embargo_bars: int = 0,
+) -> List[Tuple[pd.DatetimeIndex, pd.DatetimeIndex]]:
+    """
+    基于 bar 顺序的 Purged K-Fold 划分。
+    - 按 bar 序号均分 n_splits 个连续测试区间
+    - 在每个测试区间左右各屏蔽 embargo_bars 个 bar（训练集剔除）
+    返回 (train_index, test_index) 对列表，均为原 DatetimeIndex 的子集。
+    """
+    n = len(idx)
+    if n_splits < 2 or n < n_splits:
+        raise ValueError('样本过少，无法进行时间序列CV')
+
+    # 均分折大小（尽量均匀）
+    fold_sizes = [n // n_splits] * n_splits
+    for i in range(n % n_splits):
+        fold_sizes[i] += 1
+
+    # 累积得到每折的 [start, end) 位置范围
+    boundaries: List[Tuple[int, int]] = []
+    start = 0
+    for sz in fold_sizes:
+        end = start + sz
+        boundaries.append((start, end))
+        start = end
+
+    embargo_bars = int(max(0, embargo_bars))
+    positions = np.arange(n)
+    out: List[Tuple[pd.DatetimeIndex, pd.DatetimeIndex]] = []
+    for (s, e) in boundaries:
+        test_mask_pos = (positions >= s) & (positions < e)
+        # 左右屏蔽区
+        left_start = max(0, s - embargo_bars)
+        left_end = s
+        right_start = e
+        right_end = min(n, e + embargo_bars)
+        left_block_pos = (positions >= left_start) & (positions < left_end)
+        right_block_pos = (positions >= right_start) & (positions < right_end)
+
+        exclude_pos = left_block_pos | right_block_pos | test_mask_pos
+        train_idx = idx[~exclude_pos]
+        test_idx = idx[test_mask_pos]
+        if len(train_idx) == 0 or len(test_idx) == 0:
+            continue
+        out.append((train_idx, test_idx))
+    return out
+
+
 def purged_cv_evaluate(
     X: pd.DataFrame,
     y: pd.Series,
     n_splits: int = 5,
     embargo: str = '1H',
+    is_open_embargo: bool = False,
     model_type: str = 'ridge',
     random_state: int = 42,
     fee_rate: float = 1e-4,
@@ -268,7 +412,7 @@ def purged_cv_evaluate(
     使用 Purged 时间序列 CV 进行回归评估，返回按折与汇总的指标。
     指标：Pearson IC、Spearman IC、RMSE、方向准确率。
     """
-    assert X.index.equals(y.index)
+    # assert X.index.equals(y.index)
 
     # 选择模型
     if model_type == 'rf':
@@ -276,11 +420,19 @@ def purged_cv_evaluate(
             n_estimators=300, max_depth=8, random_state=random_state, n_jobs=-1
         )
         use_scaler = False
+    elif model_type in ('ridge', 'ridge_reg'):
+        base_model = Ridge(alpha=1.0, random_state=random_state)
+        use_scaler = True
+    elif model_type in ('linear', 'ols', 'linreg'):
+        base_model = LinearRegression()
+        use_scaler = True
     else:
+        # 默认回退到 Ridge，保持向后兼容
         base_model = Ridge(alpha=1.0, random_state=random_state)
         use_scaler = True
 
-    splits = _time_splits_purged(X.index, n_splits=n_splits, embargo=embargo)
+    embargo_to_use = embargo if is_open_embargo else pd.Timedelta(0)
+    splits = _time_splits_purged(X.index, n_splits=n_splits, embargo=embargo_to_use)
     by_fold = []
     preds_all = pd.Series(index=X.index, dtype=float)
 
@@ -362,6 +514,121 @@ def purged_cv_evaluate(
         'ret_net_mean_mean': float(df_folds['ret_net_mean'].mean()) if 'ret_net_mean' in df_folds else np.nan,
         'sharpe_net_mean': float(df_folds['sharpe_net'].mean()) if 'sharpe_net' in df_folds else np.nan,
         'sharpe_net_ann_mean': float(df_folds['sharpe_net_ann'].mean()) if 'sharpe_net_ann' in df_folds else np.nan,
+        'n_splits_effective': int(len(df_folds)),
+    }
+    return {
+        'by_fold': by_fold,
+        'summary': summary,
+        'predictions': preds_all,
+    }
+
+
+def purged_cv_evaluate_bars(
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_splits: int = 5,
+    embargo_bars: int = 0,
+    is_open_embargo: bool = False,
+    model_type: str = 'ridge',
+    random_state: int = 42,
+    fee_rate: float = 1e-4,
+    annualize: bool = True,
+    period_seconds: Optional[List[float]] = [5],
+    seconds_per_year: float = 365.0 * 24.0 * 3600.0,
+) -> Dict:
+    """
+    使用基于 bar 计数的 Purged 时间序列 CV 进行回归评估。
+    - 折分：按 bar 序号均分折，保持时间先后顺序
+    - Embargo：左右各排除 embargo_bars 个 bar（若关闭开关，则为 0）
+    指标：Pearson IC、Spearman IC、RMSE、方向准确率。
+    """
+    # 选择模型
+    if model_type == 'rf':
+        base_model = RandomForestRegressor(
+            n_estimators=300, max_depth=8, random_state=random_state, n_jobs=-1
+        )
+        use_scaler = False
+    elif model_type in ('ridge', 'ridge_reg'):
+        base_model = Ridge(alpha=1.0, random_state=random_state)
+        use_scaler = True
+    elif model_type in ('linear', 'ols', 'linreg'):
+        base_model = LinearRegression()
+        use_scaler = True
+    else:
+        # 默认回退到 Ridge，保持向后兼容
+        base_model = Ridge(alpha=1.0, random_state=random_state)
+        use_scaler = True
+
+    embargo_bars_to_use = int(embargo_bars) if is_open_embargo else 0
+    splits = _bar_splits_purged(X.index, n_splits=n_splits, embargo_bars=embargo_bars_to_use)
+    by_fold = []
+    preds_all = pd.Series(index=X.index, dtype=float)
+
+    for fold_id, (tr_idx, te_idx) in enumerate(splits):
+        Xtr, ytr = X.loc[tr_idx], y.loc[tr_idx]
+        Xte, yte = X.loc[te_idx], y.loc[te_idx]
+
+        # 删除可能存在的时间列
+        drop_cols = [c for c in ['feature_start', 'feature_end', 'prediction_time'] if c in Xtr.columns]
+        if drop_cols:
+            Xtr.drop(columns=drop_cols, inplace=True)
+        drop_cols_te = [c for c in ['feature_start', 'feature_end', 'prediction_time'] if c in Xte.columns]
+        if drop_cols_te:
+            Xte.drop(columns=drop_cols_te, inplace=True)
+
+        if use_scaler:
+            scaler = StandardScaler()
+            Xtr_scaled = pd.DataFrame(
+                scaler.fit_transform(Xtr.values), index=Xtr.index, columns=Xtr.columns
+            )
+            Xte_scaled = pd.DataFrame(
+                scaler.transform(Xte.values), index=Xte.index, columns=Xte.columns
+            )
+        else:
+            Xtr_scaled, Xte_scaled = Xtr, Xte
+
+        model = base_model
+        model.fit(Xtr_scaled, ytr)
+        yhat = pd.Series(model.predict(Xte_scaled), index=te_idx)
+        preds_all.loc[te_idx] = yhat
+
+        pearson_ic = yhat.corr(yte)
+        spearman_ic = yhat.corr(yte, method='spearman')
+        rmse = mean_squared_error(yte, yhat) ** 0.5
+        dir_acc = (np.sign(yhat) == np.sign(yte)).mean()
+
+        pos = np.sign(yhat).fillna(0.0)
+        ret_gross = (pos * yte).astype(float)
+        turnover = pos.diff().abs().fillna(np.abs(pos.iloc[0]))
+        ret_net = ret_gross - fee_rate * turnover
+        sharpe_net = float(ret_net.mean() / ret_net.std()) if ret_net.std() > 0 else np.nan
+
+        plot_predictions_vs_truth(yhat, yte, save_path = f'/Users/aming/project/python/crypto-trade/strategy/fusion/pic/{fold_id}')
+
+        by_fold.append({
+            'fold': fold_id,
+            'pearson_ic': float(pearson_ic),
+            'spearman_ic': float(spearman_ic),
+            'rmse': float(rmse),
+            'dir_acc': float(dir_acc),
+            'ret_gross_mean': float(ret_gross.mean()),
+            'ret_net_mean': float(ret_net.mean()),
+            'ret_net_std': float(ret_net.std()) if ret_net.std() > 0 else np.nan,
+            'sharpe_net': sharpe_net,
+            'fee_rate': float(fee_rate),
+            'n_train': int(len(Xtr)),
+            'n_test': int(len(Xte)),
+        })
+
+    df_folds = pd.DataFrame(by_fold)
+    summary = {
+        'pearson_ic_mean': float(df_folds['pearson_ic'].mean()) if not df_folds.empty else np.nan,
+        'spearman_ic_mean': float(df_folds['spearman_ic'].mean()) if not df_folds.empty else np.nan,
+        'rmse_mean': float(df_folds['rmse'].mean()) if not df_folds.empty else np.nan,
+        'dir_acc_mean': float(df_folds['dir_acc'].mean()) if not df_folds.empty else np.nan,
+        'ret_gross_mean_mean': float(df_folds['ret_gross_mean'].mean()) if 'ret_gross_mean' in df_folds else np.nan,
+        'ret_net_mean_mean': float(df_folds['ret_net_mean'].mean()) if 'ret_net_mean' in df_folds else np.nan,
+        'sharpe_net_mean': float(df_folds['sharpe_net'].mean()) if 'sharpe_net' in df_folds else np.nan,
         'n_splits_effective': int(len(df_folds)),
     }
     return {
@@ -469,7 +736,7 @@ def _sum_range(prefix: np.ndarray, s: int, e: int) -> float:
 def _default_features_config() -> Dict[str, bool]:
     return {
         'base': False,                   # 基础汇总/VWAP/强度/买量占比
-        'order_flow': True,             # GOF/签名不平衡
+        'order_flow': False,             # GOF/签名不平衡
         'price_impact': False,           # Kyle/Amihud/Hasbrouck/半衰期/占比
         'volatility_noise': False,       # RV/BPV/Jump/微动量/均值回复/高低幅比
         'arrival_stats': False,          # 到达间隔统计
@@ -478,7 +745,7 @@ def _default_features_config() -> Dict[str, bool]:
         'hawkes': False,                 # 聚簇（Hawkes近似）
         'path_shape': False,             # 协动相关/VWAP偏离
         'tail': False,                   # 大单尾部比例
-        'tail_directional': False,       # 大单买卖方向性（分位阈值法）
+        'tail_directional': True,       # 大单买卖方向性（分位阈值法）
     }
 
 
@@ -500,6 +767,8 @@ def _compute_interval_trade_features_fast(
     cfg = _default_features_config()
     if features_config:
         cfg.update(features_config)
+        
+    rollling_window = round(0.1 * (e - s))
 
     # 基础聚合
     sum_qty = _sum_range(ctx.csum_qty, s, e)
@@ -1140,16 +1409,28 @@ def run_bar_interval_pipeline(
             float(median_duration.total_seconds() * max(1, horizon)) if median_duration is not None else None
         )
         period_seconds.append(sesconds)
-    filtered_X_cols = [col for col in X.columns  if 'settle' not in col and 'start' not in col and 'end' not in col and 'time' not in col]
+    filtered_X_cols = [col for col in X.columns  if 'settle' not in col and 'start' not in col and 'time' not in col]
+    
+    predict_period = 5
     X3 = X2[filtered_X_cols]
 
-    filtered_y_cols = [col for col in y2.columns  if 'time' not in col]
+    # X3 = X3.reset_index().rename(columns={'feature_end': 'time'})
+    # X3.set_index('time', inplace=True)
+
+    filtered_y_cols = [f'tH_time_{predict_period}', f'log_return_{predict_period}']
+
     y3 = y2[filtered_y_cols]
-    eval_result = purged_cv_evaluate(
+    
+    # y3 = y3.reset_index().rename(columns={f'tH_time_{predict_period}': 'time'})
+    # y3.set_index('time', inplace=True)
+
+    is_open_embargo = False
+    eval_result = purged_cv_evaluate_bars(
         X=X3,
-        y=y3[f'log_return_{5}'],
+        y=y3[f'log_return_{predict_period}'],
         n_splits=n_splits,
-        embargo=embargo_td,
+        embargo_bars=3,
+        is_open_embargo = is_open_embargo,
         model_type=model_type,
         random_state=random_state,
         period_seconds=period_seconds,
@@ -1390,7 +1671,7 @@ def main():
         window_mode='past',
         n_splits=5,
         embargo_bars=None,
-        model_type='ridge',
+        model_type='linear',
         bar_zip_path = bar_zip_path
     )
     # print(res.get('eval', {}).get('summary'))
