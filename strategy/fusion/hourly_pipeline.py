@@ -129,6 +129,18 @@ def build_dollar_bars(
     bar_start_time = None
     bar_start_idx = None
 
+    # 全局前缀和（跨 bar 的累计量），用于在 bar 结算时记录 cs_* 快照
+    csum_qty_total = 0.0
+    csum_quote_total = 0.0
+    csum_signed_qty_total = 0.0
+    csum_signed_quote_total = 0.0
+    csum_pxqty_total = 0.0
+    csum_ret2_total = 0.0
+    csum_abs_r_total = 0.0
+    csum_bpv_total = 0.0
+    prev_logp_global = None
+    prev_abs_r_global = None
+
     prices = df['price'].to_numpy(dtype=float)
     qtys = df['qty'].to_numpy(dtype=float)
     quotes = df['quote_qty'].to_numpy(dtype=float)
@@ -143,7 +155,7 @@ def build_dollar_bars(
             bar_start_time = pd.Timestamp(t)
             bar_start_idx = i
 
-        # 累积交易级指标
+        # 累积交易级指标（bar 内）
         # r 为对数收益增量；rv = Σ r^2；bpv 近似 = Σ |r_t||r_{t-1}|；abs_return_sum = Σ |r|
         if prev_logp_in_bar is not None and np.isfinite(logp):
             r = logp - prev_logp_in_bar
@@ -155,12 +167,29 @@ def build_dollar_bars(
             prev_abs_r_in_bar = abs_r
         prev_logp_in_bar = logp if np.isfinite(logp) else prev_logp_in_bar
 
+        # 累积交易级指标（全局前缀和，用于跨 bar 窗口）
+        if prev_logp_global is not None and np.isfinite(logp):
+            r_g = logp - prev_logp_global
+            abs_r_g = abs(r_g)
+            csum_ret2_total += r_g * r_g
+            if prev_abs_r_global is not None:
+                csum_bpv_total += prev_abs_r_global * abs_r_g
+            csum_abs_r_total += abs_r_g
+            prev_abs_r_global = abs_r_g
+        prev_logp_global = logp if np.isfinite(logp) else prev_logp_global
+
         curr_sum_qty += float(q_qty)
         curr_sum_signed_qty += float(sgn * q_qty)
         curr_sum_quote += float(q_quote)
         curr_sum_signed_quote += float(sgn * q_quote)
         curr_sum_pxqty += float(p * q_qty)
         curr_trades += 1
+        # 全局前缀和：数量/金额/加权价
+        csum_qty_total += float(q_qty)
+        csum_signed_qty_total += float(sgn * q_qty)
+        csum_quote_total += float(q_quote)
+        csum_signed_quote_total += float(sgn * q_quote)
+        csum_pxqty_total += float(p * q_qty)
 
         cumulative += q_quote
         bar_trade_counts[bar_id] = bar_trade_counts.get(bar_id, 0) + 1
@@ -185,6 +214,15 @@ def build_dollar_bars(
                 'intensity': float(curr_trades) / duration_sec if duration_sec > 0 else np.nan,
                 'start_trade_idx': bar_start_idx,
                 'end_trade_idx': bar_end_idx,
+                # 前缀和快照（bar 结束时刻的累计值）
+                'cs_qty': csum_qty_total,
+                'cs_quote': csum_quote_total,
+                'cs_signed_qty': csum_signed_qty_total,
+                'cs_signed_quote': csum_signed_quote_total,
+                'cs_pxqty': csum_pxqty_total,
+                'cs_ret2': csum_ret2_total,
+                'cs_abs_r': csum_abs_r_total,
+                'cs_bpv': csum_bpv_total,
             }
 
             # 为下一个 bar 重置累积器
@@ -234,6 +272,13 @@ def build_dollar_bars(
         'end_trade_idx'
     ]
     
+    # 为跨-bar 窗口提供 O(1) 差分的“前缀和”快照：使用单次遍历时记录的累计值
+    if len(per_bar_metrics) > 0:
+        metrics_df_for_cs = pd.DataFrame.from_dict(per_bar_metrics, orient='index')
+        for col in ['cs_qty','cs_quote','cs_signed_qty','cs_signed_quote','cs_pxqty','cs_ret2','cs_abs_r','cs_bpv']:
+            if col in metrics_df_for_cs.columns:
+                g[col] = metrics_df_for_cs[col]
+
     # 合并单次遍历累积得到的 per-bar 指标
     if len(per_bar_metrics) > 0:
         metrics_df = pd.DataFrame.from_dict(per_bar_metrics, orient='index')
