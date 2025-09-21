@@ -856,6 +856,86 @@ def _compute_interval_trade_features_fast(
     return out
 
 
+def _compute_interval_bar_features_fast(
+    bars: pd.DataFrame,
+    bar_window_start_idx: int,
+    bar_window_end_idx: int,
+    features_config: Optional[Dict[str, bool]] = None,
+    tail_q: float = 0.9,
+) -> Dict[str, float]:
+    """
+    使用 bar 级别的累计列（cs_*）在区间 [i0, i1) 上快速计算特征，避免逐笔切片。
+    要求 bars 含有以下列：
+      - start_time, end_time, open, high, low, close, volume, dollar_value, buy_volume, sell_volume
+      - start_trade_idx, end_trade_idx
+      - cs_qty, cs_quote, cs_signed_qty, cs_signed_quote, cs_pxqty, cs_ret2, cs_abs_r, cs_bpv
+    """
+    i0 = int(bar_window_start_idx)
+    i1 = int(bar_window_end_idx)
+    if i1 <= i0:
+        return {}
+
+    cfg = _default_features_config()
+    if features_config:
+        cfg.update(features_config)
+
+    # 半开区间 [i0, i1) 的累计差分
+    def _sum_cs(col: str) -> float:
+        arr = bars[col].to_numpy(dtype=float)
+        prev = arr[i0 - 1] if i0 > 0 else 0.0
+        return float(arr[i1 - 1] - prev)
+
+    # 基础聚合
+    sum_qty = _sum_cs('cs_qty')
+    sum_quote = _sum_cs('cs_quote')
+    sum_signed_qty = _sum_cs('cs_signed_qty')
+    sum_signed_quote = _sum_cs('cs_signed_quote')
+    sum_pxqty = _sum_cs('cs_pxqty')
+
+    # 末价/时长/强度（按 bar 数量近似强度）
+    p_last = float(bars.loc[i1 - 1, 'close'])
+    start_ts = bars.loc[i0, 'start_time']
+    end_ts = bars.loc[i1 - 1, 'end_time']
+    duration = max(1.0, (end_ts - start_ts).total_seconds())
+    intensity = float((bars.loc[i0:i1 - 1, 'trades'].sum()) / duration) if 'trades' in bars.columns else float((i1 - i0) / duration)
+
+    vwap = float(sum_pxqty / sum_qty) if sum_qty > 0 else np.nan
+
+    # 波动性相关（用累计 ret2/bpv 的差分）
+    rv = _sum_cs('cs_ret2')
+    bpv = _sum_cs('cs_bpv')
+    jump = max(rv - bpv, 0.0) if (np.isfinite(rv) and np.isfinite(bpv)) else np.nan
+
+    out: Dict[str, float] = {}
+
+    if cfg['base']:
+        out.update({
+            'int_trade_vwap': vwap,
+            'int_trade_volume_sum': sum_qty,
+            'int_trade_dollar_sum': sum_quote,
+            'int_trade_signed_volume': sum_signed_qty,
+            'int_trade_intensity': intensity,
+            'int_trade_rv': rv,
+        })
+
+    if cfg['order_flow']:
+        out.update({
+            'ofi_signed_qty_sum': sum_signed_qty,
+            'ofi_signed_quote_sum': sum_signed_quote,
+        })
+
+    if cfg['volatility_noise']:
+        out.update({
+            'rv': rv,
+            'bpv': bpv,
+            'jump_rv_bpv': jump,
+        })
+
+    # 仅用 bar 级累计数据难以可靠复现一些基于逐笔的高级特征（如到达间隔、滚动 OFI、路径协动等），
+    # 故此函数仅返回与累计可差分的一致口径指标。
+
+    return out
+
 def _fast_price_impact_metrics(ctx: TradesContext, s: int, e: int) -> Dict[str, float]:
     """
     价格冲击与流动性代理（fast）：
