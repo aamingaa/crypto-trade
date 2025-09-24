@@ -105,17 +105,17 @@ def build_dollar_bars(
     df['buy_qty'] = df['qty'].where(df['trade_sign'] > 0, 0.0)
     df['sell_qty'] = df['qty'].where(df['trade_sign'] < 0, 0.0)
         
-    conditions = [
-        df['quote_qty'] > 100000,                      # 超大单：大于10万美元
-        (df['quote_qty'] > 10000) & (df['quote_qty'] <= 100000),  # 大单：1万-10万美元
-        (df['quote_qty'] > 1000) & (df['quote_qty'] <= 10000),    # 中单：1000-1万美元
-        (df['quote_qty'] > 100) & (df['quote_qty'] <= 1000),      # 小单：100-1000美元
-        (df['quote_qty'] > 10) & (df['quote_qty'] <= 100),        # 微型单：10-100美元
-        df['quote_qty'] <= 10                                 # 纳米单：小于等于10美元
-    ]
+    # conditions = [
+    #     df['quote_qty'] > 100000,                      # 超大单：大于10万美元
+    #     (df['quote_qty'] > 10000) & (df['quote_qty'] <= 100000),  # 大单：1万-10万美元
+    #     (df['quote_qty'] > 1000) & (df['quote_qty'] <= 10000),    # 中单：1000-1万美元
+    #     (df['quote_qty'] > 100) & (df['quote_qty'] <= 1000),      # 小单：100-1000美元
+    #     (df['quote_qty'] > 10) & (df['quote_qty'] <= 100),        # 微型单：10-100美元
+    #     df['quote_qty'] <= 10                                 # 纳米单：小于等于10美元
+    # ]
 
-    order_types = ['super', 'big', 'medium', 'small', 'micro', 'nano']
-    df['order_type'] = np.select(conditions, order_types, default='unknown')
+    # order_types = ['super', 'big', 'medium', 'small', 'micro', 'nano']
+    # df['order_type'] = np.select(conditions, order_types, default='unknown')
 
     # 向量化生成 bar_id：用累计成交额除以阈值（减去微小 eps 保证等于阈值时仍归当前 bar）
     prices = df['price'].to_numpy(dtype=float)
@@ -153,6 +153,44 @@ def build_dollar_bars(
         'end_trade_idx'
     ]
 
+    # 绝对阈值大单（基于逐笔金额）按 bar 聚合
+    # 阈值集合可根据需要调整
+    abs_thresholds = [100.0, 1000.0, 10000.0, 100000.0]
+    # 使用 numpy 向量化 + bincount，避免重复 groupby
+    bar_ids_arr = df['bar_id'].to_numpy(dtype=np.int64)
+    quote_arr = df['quote_qty'].to_numpy(dtype=np.float64)
+    sign_arr = np.where(df['trade_sign'].to_numpy() > 0, 1.0, -1.0)
+    n_bars = int(g.index.max()) + 1 if len(g.index) > 0 else 0
+    for thr in abs_thresholds:
+        m = quote_arr >= thr
+        if n_bars == 0 or not np.any(m):
+            tag = f"abs_{int(thr)}"
+            g[f'large_{tag}_dollar_sum'] = 0.0
+            g[f'large_{tag}_count'] = 0.0
+            g[f'large_{tag}_buy_dollar'] = 0.0
+            g[f'large_{tag}_sell_dollar'] = 0.0
+            g[f'large_{tag}_buy_count'] = 0.0
+            g[f'large_{tag}_sell_count'] = 0.0
+            continue
+
+        # 全部、买、卖的金额与个数
+        dollar_sum = np.bincount(bar_ids_arr[m], weights=quote_arr[m], minlength=n_bars)
+        count_sum = np.bincount(bar_ids_arr[m], minlength=n_bars)
+        mb = m & (sign_arr > 0)
+        ms = m & (sign_arr < 0)
+        buy_dollar = np.bincount(bar_ids_arr[mb], weights=quote_arr[mb], minlength=n_bars)
+        sell_dollar = np.bincount(bar_ids_arr[ms], weights=quote_arr[ms], minlength=n_bars)
+        buy_count = np.bincount(bar_ids_arr[mb], minlength=n_bars)
+        sell_count = np.bincount(bar_ids_arr[ms], minlength=n_bars)
+
+        tag = f"abs_{int(thr)}"
+        g[f'large_{tag}_dollar_sum'] = dollar_sum.astype(float)
+        g[f'large_{tag}_count'] = count_sum.astype(float)
+        g[f'large_{tag}_buy_dollar'] = buy_dollar.astype(float)
+        g[f'large_{tag}_sell_dollar'] = sell_dollar.astype(float)
+        g[f'large_{tag}_buy_count'] = buy_count.astype(float)
+        g[f'large_{tag}_sell_count'] = sell_count.astype(float)
+
     # 交易笔数（每个 bar 的 size）
     g['trades'] = df.groupby('bar_id').size().values
     
@@ -182,6 +220,14 @@ def build_dollar_bars(
     g['cs_ret2'] = csum_ret2[end_idx]
     g['cs_abs_r'] = csum_abs_r[end_idx]
     g['cs_bpv'] = csum_bpv[end_idx]
+
+    # 为大单绝对阈值列构建累计前缀和，便于区间 O(1) 差分
+    for thr in abs_thresholds:
+        tag = f"abs_{int(thr)}"
+        for col in ['dollar_sum', 'count', 'buy_dollar', 'sell_dollar', 'buy_count', 'sell_count']:
+            colname = f'large_{tag}_{col}'
+            if colname in g.columns:
+                g[f'cs_{colname}'] = g[colname].cumsum()
     
     
     # 仅过滤最后一个可能不完整的bar（若其成交额不足阈值）
@@ -685,6 +731,7 @@ def _default_features_config() -> Dict[str, bool]:
         'path_shape': False,             # 协动相关/VWAP偏离
         'tail': False,                   # 大单尾部比例
         'tail_directional': True,       # 大单买卖方向性（分位阈值法）
+        'bar_large_abs': False,         # 纯 bar 级绝对阈值大单特征
     }
 
 
@@ -968,6 +1015,45 @@ def _compute_interval_bar_features_fast(
             'signed_vwap_deviation': signed_dev,
             'vwap_deviation': dev,
         })
+
+    # 纯 bar 级绝对阈值大单特征（不依赖 t_ns）
+    if cfg.get('bar_large_abs', False):
+        abs_thresholds = [100.0, 1000.0, 10000.0, 100000.0]
+        def _cs_bar(col: str) -> float:
+            if col not in bars.columns:
+                return np.nan
+            arr = bars[col].to_numpy(dtype=float)
+            prev = arr[i0 - 1] if i0 > 0 else 0.0
+            return float(arr[i1 - 1] - prev)
+
+        for thr in abs_thresholds:
+            tag = f"abs_{int(thr)}"
+            # 依赖我们在 build_dollar_bars 中生成的 cs_large_* 累计列
+            dollar_sum = _cs_bar(f'cs_large_{tag}_dollar_sum')
+            count_sum = _cs_bar(f'cs_large_{tag}_count')
+            buy_dollar = _cs_bar(f'cs_large_{tag}_buy_dollar')
+            sell_dollar = _cs_bar(f'cs_large_{tag}_sell_dollar')
+            buy_count = _cs_bar(f'cs_large_{tag}_buy_count')
+            sell_count = _cs_bar(f'cs_large_{tag}_sell_count')
+
+            # share 与方向性
+            dollar_share = (dollar_sum / sum_quote) if sum_quote > 0 else np.nan
+            trade_share = (count_sum / (i1 - i0)) if (i1 - i0) > 0 else np.nan
+            lti = (buy_dollar - sell_dollar) / (buy_dollar + sell_dollar) if (buy_dollar + sell_dollar) > 0 else np.nan
+            buy_ratio = (buy_dollar / (buy_dollar + sell_dollar)) if (buy_dollar + sell_dollar) > 0 else np.nan
+
+            out.update({
+                f'bar_large_{tag}_dollar_sum': dollar_sum,
+                f'bar_large_{tag}_count': count_sum,
+                f'bar_large_{tag}_buy_dollar': buy_dollar,
+                f'bar_large_{tag}_sell_dollar': sell_dollar,
+                f'bar_large_{tag}_buy_count': buy_count,
+                f'bar_large_{tag}_sell_count': sell_count,
+                f'bar_large_{tag}_dollar_share': dollar_share,
+                f'bar_large_{tag}_trade_share': trade_share,
+                f'bar_large_{tag}_lti': lti,
+                f'bar_large_{tag}_buy_ratio': buy_ratio,
+            })
 
     # 仅用 bar 级累计数据难以可靠复现一些基于逐笔的高级特征（如到达间隔、滚动 OFI、路径协动等），
     # 故此函数仅返回与累计可差分的一致口径指标。
