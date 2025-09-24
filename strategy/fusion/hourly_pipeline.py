@@ -89,6 +89,8 @@ def build_dollar_bars(
     """
     trades['time'] = _ensure_datetime(trades['time'])
     trades = trades.sort_values('time').reset_index(drop=True)
+    
+    
     df = trades.copy()
     # 处理时间列和排序
     # df['time'] = _ensure_datetime(df['time'])
@@ -102,7 +104,19 @@ def build_dollar_bars(
     df['trade_sign'] = np.where(df['is_buyer_maker'], -1, 1)
     df['buy_qty'] = df['qty'].where(df['trade_sign'] > 0, 0.0)
     df['sell_qty'] = df['qty'].where(df['trade_sign'] < 0, 0.0)
-    
+        
+    conditions = [
+        df['quote_qty'] > 100000,                      # 超大单：大于10万美元
+        (df['quote_qty'] > 10000) & (df['quote_qty'] <= 100000),  # 大单：1万-10万美元
+        (df['quote_qty'] > 1000) & (df['quote_qty'] <= 10000),    # 中单：1000-1万美元
+        (df['quote_qty'] > 100) & (df['quote_qty'] <= 1000),      # 小单：100-1000美元
+        (df['quote_qty'] > 10) & (df['quote_qty'] <= 100),        # 微型单：10-100美元
+        df['quote_qty'] <= 10                                 # 纳米单：小于等于10美元
+    ]
+
+    order_types = ['super', 'big', 'medium', 'small', 'micro', 'nano']
+    df['order_type'] = np.select(conditions, order_types, default='unknown')
+
     # 向量化生成 bar_id：用累计成交额除以阈值（减去微小 eps 保证等于阈值时仍归当前 bar）
     prices = df['price'].to_numpy(dtype=float)
     qtys = df['qty'].to_numpy(dtype=float)
@@ -901,6 +915,21 @@ def _compute_interval_bar_features_fast(
 
     vwap = float(sum_pxqty / sum_qty) if sum_qty > 0 else np.nan
 
+    # 额外聚合（不依赖 t_ns）：买量占比、GOF（基于量）、VWAP 偏离、HL幅度占比
+    buy_qty = float(bars.loc[i0:i1 - 1, 'buy_volume'].sum()) if 'buy_volume' in bars.columns else np.nan
+    sell_qty = float(bars.loc[i0:i1 - 1, 'sell_volume'].sum()) if 'sell_volume' in bars.columns else np.nan
+    trade_buy_ratio = (buy_qty / sum_qty) if (sum_qty > 0 and np.isfinite(buy_qty)) else np.nan
+
+    gof_by_volume = (sum_signed_qty / sum_qty) if sum_qty > 0 else np.nan
+
+    dev = (p_last - vwap) / vwap if (vwap != 0 and np.isfinite(vwap)) else np.nan
+    signed_dev = dev * (1.0 if sum_signed_qty > 0 else (-1.0 if sum_signed_qty < 0 else 0.0)) if pd.notna(dev) else np.nan
+
+    hi = float(bars.loc[i0:i1 - 1, 'high'].max()) if 'high' in bars.columns else np.nan
+    lo = float(bars.loc[i0:i1 - 1, 'low'].min()) if 'low' in bars.columns else np.nan
+    mid = (hi + lo) / 2.0 if (np.isfinite(hi) and np.isfinite(lo)) else np.nan
+    hl_amplitude_ratio = float((hi - lo) / mid) if (pd.notna(mid) and mid != 0) else np.nan
+
     # 波动性相关（用累计 ret2/bpv 的差分）
     rv = _sum_cs('cs_ret2')
     bpv = _sum_cs('cs_bpv')
@@ -915,6 +944,7 @@ def _compute_interval_bar_features_fast(
             'int_trade_dollar_sum': sum_quote,
             'int_trade_signed_volume': sum_signed_qty,
             'int_trade_intensity': intensity,
+            'int_trade_buy_ratio': trade_buy_ratio,
             'int_trade_rv': rv,
         })
 
@@ -922,6 +952,7 @@ def _compute_interval_bar_features_fast(
         out.update({
             'ofi_signed_qty_sum': sum_signed_qty,
             'ofi_signed_quote_sum': sum_signed_quote,
+            'gof_by_volume': gof_by_volume,
         })
 
     if cfg['volatility_noise']:
@@ -929,6 +960,13 @@ def _compute_interval_bar_features_fast(
             'rv': rv,
             'bpv': bpv,
             'jump_rv_bpv': jump,
+            'hl_amplitude_ratio': hl_amplitude_ratio,
+        })
+
+    if cfg['path_shape']:
+        out.update({
+            'signed_vwap_deviation': signed_dev,
+            'vwap_deviation': dev,
         })
 
     # 仅用 bar 级累计数据难以可靠复现一些基于逐笔的高级特征（如到达间隔、滚动 OFI、路径协动等），
