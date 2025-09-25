@@ -237,7 +237,85 @@ def build_dollar_bars(
     # 重置bar_id为连续整数（避免因过滤最后一个bar导致的断档）
     g = g.reset_index(drop=True)
     g['bar_id'] = g.index
-    
+
+    # ================= 单bar内原子波动特征（不涉及滚动） =================
+    # 仅依赖于每根bar的 OHLC 与上一根bar的 close
+    eps = 1e-12
+    # 为防止除零与 log 负无穷
+    close = g['close'].astype(float)
+    open_ = g['open'].astype(float)
+    high = g['high'].astype(float)
+    low = g['low'].astype(float)
+    prev_close = close.shift(1)
+
+    # 基础对数收益
+    r = np.log((close + eps) / (prev_close + eps))
+    g['bar_logret'] = r
+    g['bar_abs_logret'] = r.abs()
+    g['bar_logret2'] = r * r
+    g['bar_logret4'] = (r * r) * (r * r)
+
+    # 高低对数幅度
+    log_hl = np.log((high + eps) / (low + eps))
+    g['bar_log_hl'] = log_hl
+
+    # Parkinson/Garman–Klass/Rogers–Satchell 方差（单bar项）
+    g['bar_parkinson_var'] = (log_hl ** 2) / (4.0 * np.log(2.0))
+    log_co = np.log((close + eps) / (open_ + eps))
+    g['bar_gk_var'] = 0.5 * (log_hl ** 2) - (2.0 * np.log(2.0) - 1.0) * (log_co ** 2)
+    g['bar_rs_var'] = (
+        np.log((high + eps) / (close + eps)) * np.log((high + eps) / (open_ + eps)) +
+        np.log((low + eps) / (close + eps))  * np.log((low + eps)  / (open_ + eps))
+    )
+
+    # True Range 及归一化
+    tr_candidates = np.vstack([
+        (high - low).to_numpy(dtype=float),
+        (high - prev_close).abs().to_numpy(dtype=float),
+        (low - prev_close).abs().to_numpy(dtype=float),
+    ])
+    g['bar_tr'] = np.nanmax(tr_candidates, axis=0)
+    g['bar_tr_norm'] = g['bar_tr'] / (close + eps)
+
+    # 相对范围/开收相对幅度
+    g['bar_range_rel'] = (high - low) / (close + eps)
+    g['bar_oc_rel'] = (close - open_).abs() / (close + eps)
+
+    # 位置类（区间内收盘位置）
+    hl_span = (high - low).replace(0, np.nan)
+    g['bar_clv'] = ((close - low) - (high - close)) / hl_span
+    g['bar_ulc'] = (high - close) / hl_span
+    g['bar_llc'] = (close - low) / hl_span
+    g[['bar_clv','bar_ulc','bar_llc']] = g[['bar_clv','bar_ulc','bar_llc']].fillna(0.0)
+
+    # 活跃度（dollar bar 特有）：bar时长与单位时间强度
+    # 注意：start_time/end_time 可能为字符串，先转为 datetime
+    st = pd.to_datetime(g['start_time'])
+    et = pd.to_datetime(g['end_time'])
+    duration_s = (et - st).dt.total_seconds().clip(lower=1.0)
+    g['bar_duration_s'] = duration_s
+    # 单位时间成交金额与笔数强度
+    g['bar_intensity_trade_per_s'] = g['trades'] / duration_s if 'trades' in g.columns else (1.0 / duration_s)
+    g['bar_dollar_per_s'] = g['dollar_value'] / duration_s
+
+    # Amihud bar级（若 volume 为数量，则 dollar_value 更合适）
+    g['bar_amihud'] = g['bar_abs_logret'] / (g['dollar_value'].replace(0, np.nan))
+    g['bar_amihud'] = g['bar_amihud'].fillna(0.0)
+
+    # Bipower 单bar项（|r_t||r_{t-1}|）
+    abs_r = g['bar_abs_logret']
+    g['bar_bpv_term'] = abs_r * abs_r.shift(1)
+
+    # ================= 前缀累计列（用于后续任意窗口O(1)差分） =================
+    cs_cols = [
+        'bar_logret','bar_abs_logret','bar_logret2','bar_logret4',
+        'bar_tr','bar_log_hl','bar_parkinson_var','bar_gk_var','bar_rs_var',
+        'bar_bpv_term','bar_duration_s','dollar_value','volume','trades'
+    ]
+    for col in cs_cols:
+        if col in g.columns:
+            g[f'cs_{col}'] = g[col].fillna(0.0).cumsum()
+
     return g
  
 
