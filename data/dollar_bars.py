@@ -87,7 +87,48 @@ class DollarBarBuilder(BaseDataProcessor):
         # 交易笔数
         g['trades'] = df.groupby('bar_id').size().values
         
+        # 添加逐笔交易级别的累计前缀和数据
+        self._add_trade_level_cumulative_data(g, df)
+        
         return g
+    
+    def _add_trade_level_cumulative_data(self, bars: pd.DataFrame, df: pd.DataFrame):
+        """添加逐笔交易级别的累计前缀和数据"""
+        # 提取数组用于向量化计算
+        prices = df['price'].to_numpy(dtype=float)
+        qtys = df['qty'].to_numpy(dtype=float) 
+        quotes = df['quote_qty'].to_numpy(dtype=float)
+        signs = np.where(df['is_buyer_maker'].to_numpy(), -1.0, 1.0)
+        
+        # 计算累计前缀和
+        csum_qty = np.cumsum(qtys)
+        csum_signed_qty = np.cumsum(signs * qtys)
+        csum_quote = np.cumsum(quotes)
+        csum_signed_quote = np.cumsum(signs * quotes)
+        csum_pxqty = np.cumsum(prices * qtys)
+        
+        # 波动相关的累计数据
+        logp = np.log(prices)
+        r = np.diff(logp)
+        ret2 = np.r_[0.0, r * r]
+        abs_r = np.r_[0.0, np.abs(r)]
+        # Bipower variation: |r_t||r_{t-1}|
+        bp_core = np.r_[0.0, np.r_[0.0, abs_r[1:] * abs_r[:-1]]]
+        
+        csum_ret2 = np.cumsum(ret2)
+        csum_abs_r = np.cumsum(abs_r)
+        csum_bpv = np.cumsum(bp_core)
+        
+        # 将累计数据映射到每个bar的结束位置
+        end_idx = bars['end_trade_idx'].to_numpy(dtype=int)
+        bars['cs_qty'] = csum_qty[end_idx]
+        bars['cs_quote'] = csum_quote[end_idx]
+        bars['cs_signed_qty'] = csum_signed_qty[end_idx]
+        bars['cs_signed_quote'] = csum_signed_quote[end_idx]
+        bars['cs_pxqty'] = csum_pxqty[end_idx]
+        bars['cs_ret2'] = csum_ret2[end_idx]
+        bars['cs_abs_r'] = csum_abs_r[end_idx]
+        bars['cs_bpv'] = csum_bpv[end_idx]
     
     def _add_large_order_stats(self, df: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
         """添加大单统计"""
