@@ -1013,6 +1013,8 @@ def _compute_interval_bar_features_fast(
     i1 = int(bar_window_end_idx)
     if i1 <= i0:
         return {}
+    # 区间内 bar 数量
+    n = float(i1 - i0)
 
     cfg = _default_features_config()
     if features_config:
@@ -1055,10 +1057,39 @@ def _compute_interval_bar_features_fast(
     mid = (hi + lo) / 2.0 if (np.isfinite(hi) and np.isfinite(lo)) else np.nan
     hl_amplitude_ratio = float((hi - lo) / mid) if (pd.notna(mid) and mid != 0) else np.nan
 
-    # 波动性相关（用累计 ret2/bpv 的差分）
+    # 波动性相关（两套口径）：
+    # 1) 逐笔累积口径（已有）
     rv = _sum_cs('cs_ret2')
     bpv = _sum_cs('cs_bpv')
     jump = max(rv - bpv, 0.0) if (np.isfinite(rv) and np.isfinite(bpv)) else np.nan
+
+    # 2) bar内口径（使用我们在 build_dollar_bars 中新增的 cs_bar_* 列）
+    mu1 = float(np.sqrt(2.0 / np.pi))
+    rv_bar = _sum_cs('cs_bar_logret2') if 'cs_bar_logret2' in bars.columns else np.nan
+    av_bar = _sum_cs('cs_bar_abs_logret') if 'cs_bar_abs_logret' in bars.columns else np.nan
+    r4_sum = _sum_cs('cs_bar_logret4') if 'cs_bar_logret4' in bars.columns else np.nan
+    rq_bar = float((n / 3.0) * r4_sum) if (np.isfinite(r4_sum) and n > 0) else np.nan
+    bpv_bar_core = _sum_cs('cs_bar_bpv_term') if 'cs_bar_bpv_term' in bars.columns else np.nan
+    bpv_bar = float(bpv_bar_core / (mu1 ** 2)) if np.isfinite(bpv_bar_core) else np.nan
+    jump_bar = max(rv_bar - bpv_bar, 0.0) if (np.isfinite(rv_bar) and np.isfinite(bpv_bar)) else np.nan
+
+    # ATR 与方差估计的 bar 聚合均值
+    atr_sum = _sum_cs('cs_bar_tr') if 'cs_bar_tr' in bars.columns else np.nan
+    atr_mean = float(atr_sum / n) if (np.isfinite(atr_sum) and n > 0) else np.nan
+    pkn_sum = _sum_cs('cs_bar_parkinson_var') if 'cs_bar_parkinson_var' in bars.columns else np.nan
+    gk_sum = _sum_cs('cs_bar_gk_var') if 'cs_bar_gk_var' in bars.columns else np.nan
+    rs_sum = _sum_cs('cs_bar_rs_var') if 'cs_bar_rs_var' in bars.columns else np.nan
+    pkn_mean = float(pkn_sum / n) if (np.isfinite(pkn_sum) and n > 0) else np.nan
+    gk_mean = float(gk_sum / n) if (np.isfinite(gk_sum) and n > 0) else np.nan
+    rs_mean = float(rs_sum / n) if (np.isfinite(rs_sum) and n > 0) else np.nan
+
+    # 归一化：按时间与按成交额
+    dur_sum = _sum_cs('cs_bar_duration_s') if 'cs_bar_duration_s' in bars.columns else np.nan
+    dollar_sum = _sum_cs('cs_dollar_value') if 'cs_dollar_value' in bars.columns else np.nan
+    rv_bar_per_s = float(rv_bar / dur_sum) if (np.isfinite(rv_bar) and np.isfinite(dur_sum) and dur_sum > 0) else np.nan
+    atr_per_s = float(atr_sum / dur_sum) if (np.isfinite(atr_sum) and np.isfinite(dur_sum) and dur_sum > 0) else np.nan
+    rv_bar_per_dollar = float(rv_bar / dollar_sum) if (np.isfinite(rv_bar) and np.isfinite(dollar_sum) and dollar_sum > 0) else np.nan
+    atr_per_dollar = float(atr_sum / dollar_sum) if (np.isfinite(atr_sum) and np.isfinite(dollar_sum) and dollar_sum > 0) else np.nan
 
     out: Dict[str, float] = {}
 
@@ -1087,6 +1118,23 @@ def _compute_interval_bar_features_fast(
             'jump_rv_bpv': jump,
             'hl_amplitude_ratio': hl_amplitude_ratio,
         })
+
+    # 无论配置如何，补充 bar 口径聚合（以 bar_ 前缀避免冲突）
+    out.update({
+        'bar_rv': rv_bar,
+        'bar_av': av_bar,
+        'bar_rq': rq_bar,
+        'bar_bpv': bpv_bar,
+        'bar_jump_rv_bpv': jump_bar,
+        'bar_atr_mean': atr_mean,
+        'bar_parkinson_mean': pkn_mean,
+        'bar_gk_mean': gk_mean,
+        'bar_rs_mean': rs_mean,
+        'bar_rv_per_s': rv_bar_per_s,
+        'bar_atr_per_s': atr_per_s,
+        'bar_rv_per_dollar': rv_bar_per_dollar,
+        'bar_atr_per_dollar': atr_per_dollar,
+    })
 
     if cfg['path_shape']:
         out.update({
@@ -1514,6 +1562,14 @@ def make_interval_feature_dataset(
             feature_start_ts = bars.loc[bar_window_start_idx, 'start_time']
             feature_end_ts = bars.loc[bar_window_end_idx, 'end_time']
             feat = _compute_interval_trade_features_fast(ctx=ctx, start_ts=feature_start_ts, end_ts=feature_end_ts, bars=bars, bar_window_start_idx=bar_window_start_idx, bar_window_end_idx=bar_window_end_idx)
+            # 追加 bar 级聚合输出（使用半开区间 [i0, i1)）
+            # feat_bar = _compute_interval_bar_features_fast(
+            #     bars=bars,
+            #     bar_window_start_idx=bar_window_start_idx,
+            #     bar_window_end_idx=bar_window_end_idx + 1,
+            # )
+
+            feat.update(feat_bar)
             if idx % 50 == 0:
                 print(f'idx={idx}, total={len(close_s.index)}')
             idx = idx + 1
