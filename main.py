@@ -24,8 +24,8 @@ def main():
     
     # 数据配置
     start_date = '2025-01-01'
-    end_date = '2025-01-02'
-    dollar_threshold = 10000 * 6000
+    end_date = '2025-01-10'
+    dollar_threshold = 10000 * 60000
     dollar_threshold_str = str(dollar_threshold).replace("*", "_")
     
     # 文件路径

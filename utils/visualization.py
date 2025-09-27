@@ -6,6 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from typing import Dict, Optional
 import seaborn as sns
+from utils.statistics import StatisticsAnalyzer
 
 
 class TradingVisualizer:
@@ -16,6 +17,7 @@ class TradingVisualizer:
         plt.style.use('seaborn-v0_8')
         plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial Unicode MS', 'DejaVu Sans']
         plt.rcParams['axes.unicode_minus'] = False
+        self.stats_analyzer = StatisticsAnalyzer()
     
     def plot_predictions_vs_truth(self, preds: pd.Series, y_true: pd.Series,
                                  title: str = "预测值 vs 真实值",
