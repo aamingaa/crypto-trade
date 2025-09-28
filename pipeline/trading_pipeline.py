@@ -10,7 +10,8 @@ from datetime import datetime, timedelta
 from core.base import ConfigManager
 from data.trades_processor import TradesProcessor
 from data.dollar_bars import DollarBarBuilder
-from features.microstructure_features import MicrostructureFeatureExtractor
+# from features import MicrostructureFeatureExtractor
+from features.microstructure_extractor import MicrostructureFeatureExtractor
 from ml.models import ModelFactory
 from ml.validators import PurgedBarValidator
 from utils.visualization import TradingVisualizer
