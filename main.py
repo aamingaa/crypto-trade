@@ -10,12 +10,12 @@ def main():
     # 配置参数
     config = {
         'features': {
-            'base': True,
-            'order_flow': True,
-            'price_impact': True,
-            'volatility_noise': True,
-            'path_shape': True,
-            'tail_directional': True,
+            'basic': False,
+            'orderflow': True,
+            'impact': False,
+            'volatility': False,
+            'path_shape': False,
+            'tail': False,
         },
         'model': {
             'random_state': 42
@@ -24,7 +24,7 @@ def main():
     
     # 数据配置
     start_date = '2025-01-01'
-    end_date = '2025-01-10'
+    end_date = '2025-01-30'
     dollar_threshold = 10000 * 60000
     dollar_threshold_str = str(dollar_threshold).replace("*", "_")
     
