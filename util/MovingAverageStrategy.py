@@ -336,7 +336,7 @@ if __name__ == "__main__":
     end_date = "2025-06-30"
 
     crypto_metric={}
-    crypto_list = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+    crypto_list = ["BTCUSDT","ETHUSDT","SOLUSDT", "DOGEUSDT","XRPUSDT","BNBUSDT","AVAXUSDT","SUIUSDT"]
     for crypto in crypto_list:
         # crypto = "BNBUSDT"
         crypto_metric[crypto] = {}
