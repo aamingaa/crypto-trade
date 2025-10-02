@@ -25,6 +25,7 @@ warnings.filterwarnings('ignore')
 # df_price['timestamp'] = pd.to_datetime(df_price['timestamp'])
 
 file_path = f'/Volumes/Ext-Disk/data/futures/um/daily/klines'
+save_path = f'/Users/aming/project/python/crypto-trade/output/'
 fee_rate = 0.0001
 
 def generate_date_range(start_date, end_date):    
@@ -46,13 +47,14 @@ def load_daily_data(start_date:str, end_date:str, interval:str, crypto:str = "BN
         crypto_date_data.append(pd.read_csv(f"{file_path}/{crypto}/{interval}/{suffix}/{crypto}-{interval}-{date}.zip"))
     
     z = pd.concat(crypto_date_data, axis=0, ignore_index=True)
-    # 处理时间戳,变成年月日-时分秒格式
-    z['open_time'] = pd.to_datetime(z['open_time'], unit='ms').dt.strftime('%Y-%m-%d %H:%M:%S')
-    z['close_time'] = pd.to_datetime(z['close_time'], unit='ms').dt.strftime('%Y-%m-%d %H:%M:%S')
+    # 处理时间戳为 DatetimeIndex，便于后续按日/月/年分组和年化计算
+    z['open_time'] = pd.to_datetime(z['open_time'], unit='ms')
+    z['close_time'] = pd.to_datetime(z['close_time'], unit='ms')
 
     z = z.sort_values(by='close_time', ascending=True) # 注意这一步是非常必要的，要以timestamp作为排序基准
-    z = z.drop_duplicates('close_time').reset_index() # 注意这一步非常重要，以timestamp为基准进行去重处理
+    z = z.drop_duplicates('close_time').reset_index(drop=True) # 注意这一步非常重要，以timestamp为基准进行去重处理
     z = z.set_index('close_time')
+    z['interval'] = interval  # 保存interval信息，供后续使用
     return z
 
 
@@ -122,7 +124,7 @@ def MA_Strategy(data_price, window_short=5, window_median=10, window_long=20, lo
     ##2.1绘制K线和均线
 
     kline = Kline( init_opts=opts.InitOpts(width='1200px',height='600px',theme=ThemeType.DARK) )  # 设置K线图的长和宽
-    kline.add_xaxis( data_price.index.tolist() ) # 将index也就是时间轴设置为X轴
+    kline.add_xaxis( data_price.index.strftime('%Y-%m-%d %H:%M:%S').tolist() ) # 将index也就是时间轴设置为X轴
     y = list( data_price.loc[:,['open','high','low','close']].round(4).values ) # 设置为list，一共有data_price.shape[0]个，等待传入Kbar
     y = [i.tolist() for i in y]#里面的单个数组也必须转换成list
     kline.add_yaxis( 'Kline', y )
@@ -138,7 +140,7 @@ def MA_Strategy(data_price, window_short=5, window_median=10, window_long=20, lo
     )
 
     line = Line()
-    line.add_xaxis( data_price.index.tolist() )
+    line.add_xaxis( data_price.index.strftime('%Y-%m-%d %H:%M:%S').tolist() )
     line.add_yaxis( 'MA_short', data_price.sma.round(2).tolist(), is_smooth=True )
     line.add_yaxis( 'MA_median', data_price.mma.round(2).tolist(), is_smooth=True )
     line.add_yaxis( 'MA_long', data_price.lma.round(2).tolist(), is_smooth=True )
@@ -274,43 +276,75 @@ def MA_Strategy(data_price, window_short=5, window_median=10, window_long=20, lo
 
 def show_performance( transactions, strategy):
     ##3.1策略评价指标
-    #年化收益率
-    interval = "15m"  # 这里需手动与加载数据时的interval保持一致，或通过参数传入
-    if interval == "15m":
-        daily_periods = 8 * 60 // 15  # 8小时交易×60分钟/15分钟=32
+    
+    # 自动从strategy中获取interval信息
+    if 'interval' in strategy.columns:
+        interval = strategy['interval'].iloc[0]
+    else:
+        # 如果没有interval列，尝试从时间差推断
+        if isinstance(strategy.index, pd.DatetimeIndex) and len(strategy.index) > 1:
+            time_diff = (strategy.index[1] - strategy.index[0]).total_seconds() / 60  # 转为分钟
+            if time_diff <= 5:
+                interval = "5m"
+            elif time_diff <= 15:
+                interval = "15m"
+            elif time_diff <= 30:
+                interval = "30m"
+            elif time_diff <= 60:
+                interval = "1h"
+            else:
+                interval = "1d"
+        else:
+            interval = "1d"  # 默认日级
+    
+    # 根据interval计算年化因子
+    if interval == "5m":
+        daily_periods = 8 * 60 // 5  # 96
+    elif interval == "15m":
+        daily_periods = 8 * 60 // 15  # 32
     elif interval == "30m":
         daily_periods = 8 * 60 // 30  # 16
+    elif interval == "1h":
+        daily_periods = 8  # 8
+    elif interval == "4h":
+        daily_periods = 2  # 2
     else:
         daily_periods = 1  # 默认日级
 
-    N = 250 * daily_periods
+    N = 250 * daily_periods  # 年化周期数
     rf = 0.04
-    # rety = strategy.nav[strategy.shape[0] - 1]**(N/strategy.shape[0]) - 1
     
+    # 年化收益率
     rety = strategy.nav.iloc[-1] **(N / len(strategy)) - 1
 
-    #夏普比
-    # Sharp = (strategy.ret*strategy.position).mean()/(strategy.ret*strategy.position).std()*np.sqrt(N)
-    
-    Sharp = (strategy.ret * strategy.position).mean() / (strategy.ret * strategy.position).std() * np.sqrt(N)
+    # 夏普比（加入分母保护）
+    ret_active = strategy.ret * strategy.position
+    ret_std = ret_active.std()
+    if ret_std > 1e-8:
+        Sharp = ret_active.mean() / ret_std * np.sqrt(N)
+    else:
+        Sharp = 0.0
 
+    # 胜率（加入空交易保护）
+    if len(transactions) > 0 and '卖出价格' in transactions.columns and '买入价格' in transactions.columns:
+        VictoryRatio = ((transactions['卖出价格'] - transactions['买入价格']) > 0).mean()
+    else:
+        VictoryRatio = 0.0
 
-    #胜率
-    VictoryRatio = ( (transactions['卖出价格'] - transactions['买入价格'])>0 ).mean()
-
-    #最大回撤率
+    # 最大回撤率
     DD = 1 - strategy.nav/strategy.nav.cummax()
     MDD = max(DD)
 
-    #单次最大亏损
-    maxloss = min(transactions['卖出价格']/transactions['买入价格'] - 1)
+    # 单次最大亏损（加入空交易保护）
+    if len(transactions) > 0 and '卖出价格' in transactions.columns and '买入价格' in transactions.columns:
+        loss_ratio = transactions['卖出价格']/transactions['买入价格'] - 1
+        maxloss = min(loss_ratio) if len(loss_ratio) > 0 else 0.0
+    else:
+        maxloss = 0.0
 
+    # 月均交易次数
     monthly_periods = daily_periods * 20
-
-    trade_count = strategy.flag.abs().sum() / len(strategy) * monthly_periods  # 核心修改
-
-    #月均交易次数
-    # trade_count=strategy.flag.abs().sum()/strategy.shape[0]*20
+    trade_count = strategy.flag.abs().sum() / len(strategy) * monthly_periods
 
     print('------------------------------')
     print('Sharpe ratio:',round(Sharp,2))
@@ -367,7 +401,7 @@ def show_performance( transactions, strategy):
     
     ##3.3策略净值可视化
     line1 = Line( init_opts=opts.InitOpts(width='1200px', height='600px', theme=ThemeType.DARK) )
-    line1.add_xaxis( strategy.index.tolist() )
+    line1.add_xaxis( strategy.index.strftime('%Y-%m-%d %H:%M:%S').tolist() )
     line1.add_yaxis( '策略净值',strategy.nav.round(2).to_list(), yaxis_index=0,is_smooth=True )
     line1.add_yaxis( '基准净值',strategy.benchmark.round(2).to_list(), yaxis_index=0,is_smooth=True )
     line1.extend_axis(yaxis=opts.AxisOpts( min_=0.8,axislabel_opts = opts.LabelOpts(formatter="{value}") ))
@@ -382,7 +416,7 @@ def show_performance( transactions, strategy):
     )
 
     line2 = Line()
-    line2.add_xaxis( strategy.index.tolist() )
+    line2.add_xaxis( strategy.index.strftime('%Y-%m-%d %H:%M:%S').tolist() )
     line2.add_yaxis( '净值之比',(strategy.nav/strategy.benchmark).round(4).tolist(),yaxis_index=1,is_smooth=True )
     line2.set_global_opts(
         datazoom_opts = [opts.DataZoomOpts(type_='inside')],#内部滑动
@@ -391,7 +425,7 @@ def show_performance( transactions, strategy):
     )
 
     line1.overlap(line2)
-    line1.render(file_path + "Dual_Moving_Average_Stratergy.html")
+    line1.render(save_path + "Dual_Moving_Average_Stratergy.html")
 
     return result,result_perday
 
@@ -399,7 +433,7 @@ def show_performance( transactions, strategy):
 trans,data = MA_Strategy(df_price, window_short=5, window_median=12, window_long=30, loss_ratio=0.05)
 print('trading record：\n',trans)
 print('show the result：\n',data)
-show_performance( trans,data ) 
+show_performance(trans, data ) 
 
 # 规则类策略第一步应该是测试这个品种是不是好做
 # 1、自己写一个支撑线，跌破的时候止损；
