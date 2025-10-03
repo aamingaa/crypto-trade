@@ -128,7 +128,7 @@ class MAStrategyAnalyzer:
                 if self.trades and self.trades[-1]['type'] == 'buy':
                     buy_trade = self.trades[-1]
                     gross_pnl = open_price - buy_trade['price']
-                    net_pnl = gross_pnl - (buy_trade['commission'] + sell_commission)
+                    net_pnl = gross_pnl - (sell_commission)
                     self.total_pnl += net_pnl
                     current_pnl = net_pnl  # 仅在平仓时记入实现盈亏
                     self.trades.append({
@@ -359,7 +359,8 @@ if __name__ == "__main__":
 
     crypto_metric={}
     # crypto_list = ["ZECUSDT","XTZUSDT","BNBUSDT","ATOMUSDT","ONTUSDT","IOTAUSDT","BATUSDT","VETUSDT","NEOUSDT","QTUMUSDT","IOSTUSDT","THETAUSDT","ALGOUSDT","ZILUSDT","KNCUSDT","ZRXUSDT","COMPUSDT","DOGEUSDT","SXPUSDT","KAVAUSDT","BANDUSDT","RLCUSDT","SNXUSDT","DOTUSDT","YFIUSDT","CRVUSDT","TRBUSDT","RUNEUSDT","SUSHIUSDT","EGLDUSDT","SOLUSDT"]
-    crypto_list = ["BTCUSDT"]
+    # crypto_list = ["BTCUSDT"]
+    crypto_list = ["ROSEUSDT","DUSKUSDT","FLOWUSDT","IMXUSDT"]
     # crypto_list = ["BTCUSDT","ETHUSDT","BCHUSDT","XRPUSDT","LTCUSDT","TRXUSDT","ETCUSDT","LINKUSDT","XLMUSDT","ADAUSDT","XMRUSDT","DASHUSDT","ZECUSDT","XTZUSDT","BNBUSDT","ATOMUSDT","ONTUSDT","IOTAUSDT","BATUSDT","VETUSDT","NEOUSDT","QTUMUSDT","IOSTUSDT","THETAUSDT","ALGOUSDT","ZILUSDT","KNCUSDT","ZRXUSDT","COMPUSDT","DOGEUSDT","SXPUSDT","KAVAUSDT","BANDUSDT","RLCUSDT","SNXUSDT","DOTUSDT","YFIUSDT","CRVUSDT","TRBUSDT","RUNEUSDT","SUSHIUSDT","EGLDUSDT","SOLUSDT","ICXUSDT","STORJUSDT","UNIUSDT","AVAXUSDT","ENJUSDT","FLMUSDT","KSMUSDT","NEARUSDT","AAVEUSDT","FILUSDT","RSRUSDT","LRCUSDT","BELUSDT","AXSUSDT","ZENUSDT","SKLUSDT","GRTUSDT","1INCHUSDT","SANDUSDT","CHZUSDT","ANKRUSDT","RVNUSDT","SFPUSDT","COTIUSDT","CHRUSDT","MANAUSDT","ALICEUSDT","GTCUSDT","HBARUSDT","ONEUSDT","DENTUSDT","CELRUSDT","HOTUSDT","MTLUSDT","OGNUSDT","NKNUSDT","1000SHIBUSDT","BAKEUSDT","BTCDOMUSDT","MASKUSDT","ICPUSDT","IOTXUSDT","C98USDT","ATAUSDT","DYDXUSDT","1000XECUSDT","GALAUSDT","CELOUSDT","ARUSDT","ARPAUSDT","CTSIUSDT","LPTUSDT","ENSUSDT","PEOPLEUSDT","ROSEUSDT","DUSKUSDT","FLOWUSDT","IMXUSDT"]
     crypto_metric_list = []
     for crypto in crypto_list:
