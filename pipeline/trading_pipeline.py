@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 from core.base import ConfigManager
 from data.trades_processor import TradesProcessor
-from data.dollar_bars import DollarBarBuilder
+from data.dollar_bars import DollarBarBuilder, TimeBarBuilder
 # from features import MicrostructureFeatureExtractor
 from features.microstructure_extractor import MicrostructureFeatureExtractor
 from ml.models import ModelFactory
@@ -83,16 +83,42 @@ class TradingPipeline:
         
         raise ValueError("必须提供trades_data、trades_zip_path或date_range+data_path_template")
     
-    def build_bars(self, trades_df: pd.DataFrame, dollar_threshold: float,
+    def build_bars(self, trades_df: pd.DataFrame, 
+                   bar_type: str = 'dollar',
+                   dollar_threshold: Optional[float] = None,
+                   time_interval: Optional[str] = None,
                    bar_zip_path: Optional[str] = None) -> pd.DataFrame:
-        """构建Dollar Bars"""
+        """
+        构建Bars（支持Dollar Bars和Time Bars）
+        
+        Args:
+            trades_df: 交易数据
+            bar_type: bar类型，'dollar' 或 'time'
+            dollar_threshold: Dollar Bar阈值（当bar_type='dollar'时需要）
+            time_interval: 时间间隔（当bar_type='time'时需要），如 '15min', '1h', '30min'
+            bar_zip_path: 缓存路径
+        
+        Returns:
+            bars DataFrame
+        """
         if bar_zip_path and os.path.exists(bar_zip_path):
             print(f"从缓存加载bars: {bar_zip_path}")
             bars = pd.read_csv(bar_zip_path)
         else:
-            print("构建Dollar Bars...")
-            bar_builder = DollarBarBuilder(dollar_threshold)
-            bars = bar_builder.process(trades_df)
+            if bar_type == 'dollar':
+                if dollar_threshold is None:
+                    raise ValueError("使用Dollar Bars时必须指定dollar_threshold")
+                print(f"构建Dollar Bars (threshold={dollar_threshold})...")
+                bar_builder = DollarBarBuilder(dollar_threshold)
+                bars = bar_builder.process(trades_df)
+            elif bar_type == 'time':
+                if time_interval is None:
+                    raise ValueError("使用Time Bars时必须指定time_interval")
+                print(f"构建Time Bars (interval={time_interval})...")
+                bar_builder = TimeBarBuilder(time_interval)
+                bars = bar_builder.process(trades_df)
+            else:
+                raise ValueError(f"不支持的bar_type: {bar_type}，请使用'dollar'或'time'")
             
             if bar_zip_path:
                 os.makedirs(os.path.dirname(bar_zip_path), exist_ok=True)
@@ -251,10 +277,24 @@ class TradingPipeline:
         print(f"加载了{len(trades_df)}条交易记录")
         
         # 构建bars
+        bar_type = kwargs.get('bar_type', 'dollar')
         dollar_threshold = kwargs.get('dollar_threshold', 60000000)
-        bars = self.build_bars(trades_df, dollar_threshold, 
-                              kwargs.get('bar_zip_path'))
-        print(f"构建了{len(bars)}个Dollar Bars")
+        time_interval = kwargs.get('time_interval', '1h')
+        
+        bars = self.build_bars(
+            trades_df, 
+            bar_type=bar_type,
+            dollar_threshold=dollar_threshold,
+            time_interval=time_interval,
+            bar_zip_path=kwargs.get('bar_zip_path')
+        )
+        
+        bar_desc = f"{bar_type.capitalize()} Bars"
+        if bar_type == 'dollar':
+            bar_desc += f" (threshold={dollar_threshold})"
+        else:
+            bar_desc += f" (interval={time_interval})"
+        print(f"构建了{len(bars)}个{bar_desc}")
         
         # 提取特征
         feature_window_bars = kwargs.get('feature_window_bars', 10)

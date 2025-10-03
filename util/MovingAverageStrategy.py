@@ -12,7 +12,7 @@ plt.rcParams["axes.unicode_minus"] = False  # 解决负号显示问题
 
 
 file_path = f'/Volumes/Ext-Disk/data/futures/um/daily/klines'
-save_path = f'/Users/aming/project/python/crypto-trade/output'
+save_path = f'/Users/aming/project/python/crypto-trade/output/evaluate_metric'
 
 def generate_date_range(start_date, end_date):    
     start = datetime.strptime(start_date, '%Y-%m-%d')
@@ -45,7 +45,7 @@ def load_daily_data(start_date:str, end_date:str, interval:str, crypto:str = "BN
 
 
 class MAStrategyAnalyzer:
-    def __init__(self, data, short_window=5, long_window=20, commission_rate=0.0001):
+    def __init__(self, data, short_window=5, long_window=20, crypto : str = None, commission_rate=0.0001):
         """
         初始化均线策略分析器
         :param data: 包含OHLC数据的DataFrame，需包含'open_time', 'open', 'high', 'low', 'close'列
@@ -75,88 +75,105 @@ class MAStrategyAnalyzer:
         self.data['cumulative_pnl'] = 0.0  # 累计PNL
         
         self.trades = []  # 记录所有交易
+        self.crypto = crypto
         self.performance_metrics = {}  # 记录绩效指标
         self.total_pnl = 0.0  # 总PNL
         
     def generate_signals(self):
-        """生成交易信号：短期均线上穿长期均线买入，下穿卖出，包含PNL计算"""
-        # 短期均线上穿长期均线，买入信号
-        self.data.loc[self.data['short_ma'] > self.data['long_ma'], 'signal'] = 1
-        # 短期均线下穿长期均线，卖出信号
-        self.data.loc[self.data['short_ma'] < self.data['long_ma'], 'signal'] = -1
+        """生成交易信号：短期均线上穿长期均线买入，下穿卖出，采用下一根K线开盘执行"""
+        # 初始化信号列为0
+        self.data['signal'] = 0
         
-        # 确定持仓状态，避免重复信号
+        # 检测金叉（Golden Cross）：短期均线从下方上穿长期均线，买入信号
+        golden_cross = (self.data['short_ma'] > self.data['long_ma']) & \
+                       (self.data['short_ma'].shift(1) <= self.data['long_ma'].shift(1))
+        self.data.loc[golden_cross, 'signal'] = 1
+        
+        # 检测死叉（Death Cross）：短期均线从上方下穿长期均线，卖出信号
+        death_cross = (self.data['short_ma'] < self.data['long_ma']) & \
+                      (self.data['short_ma'].shift(1) >= self.data['long_ma'].shift(1))
+        self.data.loc[death_cross, 'signal'] = -1
+        
+        # 采用“下一根K线开盘执行”：将信号右移一根作为执行信号
+        exec_signal = self.data['signal'].shift(1).fillna(0)
+        
+        # 根据执行信号更新持仓：1 -> 持多，-1 -> 平仓（仅做多策略：-1 表示从1变为0）
+        position = [0]
+        self.trades = []
+        self.total_pnl = 0.0
+        self.data['pnl'] = 0.0
+        
         for i in range(1, len(self.data)):
-            current_pnl = 0.0  # 当前K线的PNL
+            prev_pos = position[-1]
+            open_price = self.data['open'].iloc[i]
+            open_time = self.data['open_time'].iloc[i]
+            current_pnl = 0.0
             
-            if self.data['signal'].iloc[i] == 1 and self.data['position'].iloc[i-1] == 0:
-                self.data.at[i, 'position'] = 1  # 买入，持有多单
-                # 记录买入交易
-                buy_price = self.data['open'].iloc[i]
-                # 计算买入时的手续费
-                buy_commission = buy_price * self.commission_rate
+            # 执行买入：上一根收盘出现买入信号，本根开盘以开盘价成交
+            if exec_signal.iloc[i] == 1 and prev_pos == 0:
+                position.append(1)
+                buy_commission = open_price * self.commission_rate
                 self.trades.append({
                     'type': 'buy',
-                    'time': self.data['close_time'].iloc[i],
-                    'price': buy_price,
-                    'commission': buy_commission,  # 记录买入手续费
+                    'time': open_time,
+                    'price': open_price,
+                    'commission': buy_commission,
                     'index': i
                 })
-                current_pnl -= buy_commission  # 买入手续费计入亏损
-            
-            elif self.data['signal'].iloc[i] == -1 and self.data['position'].iloc[i-1] == 1:
-                self.data.at[i, 'position'] = 0  # 卖出，空仓
-                # 记录卖出交易，并与最近的买入匹配
+                current_pnl -= buy_commission
+            # 执行卖出（平仓）：上一根收盘出现卖出信号，本根开盘以开盘价成交
+            elif exec_signal.iloc[i] == -1 and prev_pos == 1:
+                position.append(0)
+                sell_commission = open_price * self.commission_rate
                 if self.trades and self.trades[-1]['type'] == 'buy':
                     buy_trade = self.trades[-1]
-                    sell_price = self.data['open'].iloc[i]
-                    
-                    # 计算卖出时的手续费
-                    sell_commission = sell_price * self.commission_rate
-                    # 总手续费（买入+卖出）
-                    total_commission = buy_trade['commission'] + sell_commission
-                    
-                    # 计算扣除手续费后的实际利润（PNL）
-                    gross_pnl = sell_price - buy_trade['price']
-                    net_pnl = gross_pnl - total_commission  # 净PNL
-                    self.total_pnl += net_pnl  # 累计总PNL
-                    current_pnl = net_pnl - buy_trade['commission']  # 调整当前K线的PNL
-                    
+                    gross_pnl = open_price - buy_trade['price']
+                    net_pnl = gross_pnl - (buy_trade['commission'] + sell_commission)
+                    self.total_pnl += net_pnl
+                    current_pnl = net_pnl  # 仅在平仓时记入实现盈亏
                     self.trades.append({
                         'type': 'sell',
-                        'time': self.data['close_time'].iloc[i],
-                        'price': sell_price,
+                        'time': open_time,
+                        'price': open_price,
                         'commission': sell_commission,
-                        'gross_pnl': gross_pnl,  # 毛PNL
-                        'net_pnl': net_pnl,  # 净PNL
+                        'gross_pnl': gross_pnl,
+                        'net_pnl': net_pnl,
                         'holding_period': i - buy_trade['index'],
                         'index': i
                     })
+                else:
+                    self.trades.append({
+                        'type': 'sell',
+                        'time': open_time,
+                        'price': open_price,
+                        'commission': sell_commission,
+                        'gross_pnl': 0.0,
+                        'net_pnl': -sell_commission,
+                        'holding_period': 0,
+                        'index': i
+                    })
+                    self.total_pnl -= sell_commission
+            else:
+                position.append(prev_pos)
+                # 非平仓时不记录浮动盈亏，避免重复统计
+                current_pnl = 0.0
             
-            elif self.data['position'].iloc[i] == 1:
-                # 持仓期间的浮动PNL（按收盘价计算）
-                if self.trades and self.trades[-1]['type'] == 'buy':
-                    buy_trade = self.trades[-1]
-                    current_pnl = self.data['close'].iloc[i] - self.data['close'].iloc[i-1]
-            
-            # 记录当前K线的PNL
             self.data.at[i, 'pnl'] = current_pnl
         
-        # 计算累计PNL
+        # 写回持仓序列
+        self.data['position'] = position
+        
+        # 仅累积实现盈亏
         self.data['cumulative_pnl'] = self.data['pnl'].cumsum()
         
-        # 计算策略收益和累计收益
-        self.data['market_return'] = self.data['close'].pct_change()  # 市场收益率
-        self.data['strategy_return'] = self.data['market_return'] * self.data['position'].shift(1)
-        self.data['cumulative_market'] = (1 + self.data['market_return']).cumprod()
-        self.data['cumulative_strategy'] = (1 + self.data['strategy_return']).cumprod()
+        # 采用开盘到开盘的收益率，并按上一根持仓产生策略收益
+        self.data['market_return'] = self.data['open'].pct_change()
+        self.data['strategy_return'] = self.data['market_return'] * self.data['position'].shift(1).fillna(0)
+        self.data['cumulative_market'] = (1 + self.data['market_return'].fillna(0)).cumprod()
+        self.data['cumulative_strategy'] = (1 + self.data['strategy_return'].fillna(0)).cumprod()
     
     def calculate_performance(self):
         """计算策略绩效指标（包含PNL相关指标）"""
-        if not self.trades:
-            print("没有交易记录，无法计算绩效指标")
-            return
-        
         # 筛选出所有完整交易（买入后卖出）
         sell_trades = [t for t in self.trades if t['type'] == 'sell']
         profitable_trades = [t for t in sell_trades if t['net_pnl'] > 0]
@@ -175,10 +192,11 @@ class MAStrategyAnalyzer:
         # 累计收益率
         total_return = self.data['cumulative_strategy'].iloc[-1] - 1 if len(self.data) > 0 else 0
         
-        # 夏普比率
+        # 夏普比率（基于15分钟bar：每日96根，按365天年化）
         returns = self.data['strategy_return'].dropna()
         if len(returns) > 0 and returns.std() > 0:
-            sharpe_ratio = math.sqrt(252 * 96) * (returns.mean() / returns.std())
+            annualization = 96.0 * 365.0
+            sharpe_ratio = math.sqrt(annualization) * (returns.mean() / returns.std())
         else:
             sharpe_ratio = 0
         
@@ -207,7 +225,8 @@ class MAStrategyAnalyzer:
             '最大回撤': max_drawdown,
             '胜率': win_rate,
             '总交易次数': total_sells,
-            '总手续费支出': sum(t['commission'] for t in self.trades)
+            '总手续费支出': sum(t['commission'] for t in self.trades),
+            'symbol': self.crypto
         }
         
         return self.performance_metrics
@@ -290,13 +309,16 @@ class MAStrategyAnalyzer:
         # for key in pnl_metrics:
         #     print(f"{key}: {metrics[key]:.4f}")
         
-        print("\n其他绩效指标:")
-        other_metrics = ['累计收益率', '夏普比率', '最大回撤', '胜率', '总交易次数', '总手续费支出']
-        for key in other_metrics:
-            if key in ['累计收益率', '胜率']:
-                print(f"{key}: {metrics[key]:.2%}")
-            else:
-                print(f"{key}: {metrics[key]:.4f}")
+        if metrics is not None:
+            print("\n其他绩效指标:")
+            other_metrics = ['累计收益率', '夏普比率', '最大回撤', '胜率', '总交易次数', '总手续费支出']
+            for key in other_metrics:
+                if key in ['累计收益率', '胜率']:
+                    print(f"{key}: {metrics[key]:.2%}")
+                else:
+                    print(f"{key}: {metrics[key]:.4f}")
+        else:
+            print("\n没有交易记录，可视化净值但不打印绩效指标。")
         
         self.plot_results(save_path=save_plot_path)
 
@@ -337,20 +359,22 @@ if __name__ == "__main__":
 
     crypto_metric={}
     # crypto_list = ["ZECUSDT","XTZUSDT","BNBUSDT","ATOMUSDT","ONTUSDT","IOTAUSDT","BATUSDT","VETUSDT","NEOUSDT","QTUMUSDT","IOSTUSDT","THETAUSDT","ALGOUSDT","ZILUSDT","KNCUSDT","ZRXUSDT","COMPUSDT","DOGEUSDT","SXPUSDT","KAVAUSDT","BANDUSDT","RLCUSDT","SNXUSDT","DOTUSDT","YFIUSDT","CRVUSDT","TRBUSDT","RUNEUSDT","SUSHIUSDT","EGLDUSDT","SOLUSDT"]
-    crypto_list = ["BTCUSDT","ETHUSDT","BCHUSDT","XRPUSDT","LTCUSDT","TRXUSDT","ETCUSDT","LINKUSDT","XLMUSDT","ADAUSDT","XMRUSDT","DASHUSDT","ZECUSDT","XTZUSDT","BNBUSDT","ATOMUSDT","ONTUSDT","IOTAUSDT","BATUSDT","VETUSDT","NEOUSDT","QTUMUSDT","IOSTUSDT","THETAUSDT","ALGOUSDT","ZILUSDT","KNCUSDT","ZRXUSDT","COMPUSDT","DOGEUSDT","SXPUSDT","KAVAUSDT","BANDUSDT","RLCUSDT","SNXUSDT","DOTUSDT","YFIUSDT","CRVUSDT","TRBUSDT","RUNEUSDT","SUSHIUSDT","EGLDUSDT","SOLUSDT"]
-
+    crypto_list = ["BTCUSDT"]
+    # crypto_list = ["BTCUSDT","ETHUSDT","BCHUSDT","XRPUSDT","LTCUSDT","TRXUSDT","ETCUSDT","LINKUSDT","XLMUSDT","ADAUSDT","XMRUSDT","DASHUSDT","ZECUSDT","XTZUSDT","BNBUSDT","ATOMUSDT","ONTUSDT","IOTAUSDT","BATUSDT","VETUSDT","NEOUSDT","QTUMUSDT","IOSTUSDT","THETAUSDT","ALGOUSDT","ZILUSDT","KNCUSDT","ZRXUSDT","COMPUSDT","DOGEUSDT","SXPUSDT","KAVAUSDT","BANDUSDT","RLCUSDT","SNXUSDT","DOTUSDT","YFIUSDT","CRVUSDT","TRBUSDT","RUNEUSDT","SUSHIUSDT","EGLDUSDT","SOLUSDT","ICXUSDT","STORJUSDT","UNIUSDT","AVAXUSDT","ENJUSDT","FLMUSDT","KSMUSDT","NEARUSDT","AAVEUSDT","FILUSDT","RSRUSDT","LRCUSDT","BELUSDT","AXSUSDT","ZENUSDT","SKLUSDT","GRTUSDT","1INCHUSDT","SANDUSDT","CHZUSDT","ANKRUSDT","RVNUSDT","SFPUSDT","COTIUSDT","CHRUSDT","MANAUSDT","ALICEUSDT","GTCUSDT","HBARUSDT","ONEUSDT","DENTUSDT","CELRUSDT","HOTUSDT","MTLUSDT","OGNUSDT","NKNUSDT","1000SHIBUSDT","BAKEUSDT","BTCDOMUSDT","MASKUSDT","ICPUSDT","IOTXUSDT","C98USDT","ATAUSDT","DYDXUSDT","1000XECUSDT","GALAUSDT","CELOUSDT","ARUSDT","ARPAUSDT","CTSIUSDT","LPTUSDT","ENSUSDT","PEOPLEUSDT","ROSEUSDT","DUSKUSDT","FLOWUSDT","IMXUSDT"]
+    crypto_metric_list = []
     for crypto in crypto_list:
         # crypto = "BNBUSDT"
-        crypto_metric[crypto] = {}
+        # crypto_metric[crypto] = {}
         df_price = load_daily_data(start_date, end_date, "15m", crypto=crypto)
         strategy = MAStrategyAnalyzer(
             df_price, 
             short_window=5, 
             long_window=20,
+            crypto=crypto,
             commission_rate=0.0001  # 手续费率：0.01%
         )
         # 如需保存图表，取消下面一行的注释并指定路径
         other_metrics = strategy.run_strategy(save_plot_path=f"{save_path}/strategy_results_with_commission_{crypto}.png")
-        crypto_metric[crypto] = other_metrics
-
-    print(crypto_metric)
+        crypto_metric_list.append(other_metrics)
+        # crypto_metric[crypto] = other_metrics
+    print(crypto_metric_list)
