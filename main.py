@@ -21,17 +21,40 @@ def main():
             'random_state': 42
         }
     }
+
+    # config = {
+    #     'bar_type': 'time',           # 使用时间条
+    #     'time_interval': '1h',        # 1小时间隔
+    #     'data_config': {
+    #         'trades_zip_path': 'path/to/your/trades.zip'
+    #     },
+    #     'bar_zip_path': 'output/bars_1h.zip',
+    #     'feature_window_bars': 10,
+    #     'model_type': 'ridge',
+    #     'target_horizon': 5,
+    # }
     
     # 数据配置
     start_date = '2025-01-01'
-    end_date = '2025-01-30'
+    end_date = '2025-01-20'
     dollar_threshold = 10000 * 60000
     dollar_threshold_str = str(dollar_threshold).replace("*", "_")
     
     # 文件路径
     base_path = '/Users/aming/project/python/crypto-trade/output'
-    trades_zip_path = f'{base_path}/trades-{start_date}-{end_date}-{dollar_threshold_str}.zip'
-    bar_zip_path = f'{base_path}/bars-{start_date}-{end_date}-{dollar_threshold_str}.zip'
+    bar_type = 'time'
+    time_interval = '1h'
+    trades_zip_path = None
+    bar_zip_path = None
+
+    if bar_type == 'time':  
+        trades_zip_path = f'{base_path}/trades-{start_date}-{end_date}-{time_interval}.zip'
+        bar_zip_path = f'{base_path}/bars-{start_date}-{end_date}-{time_interval}.zip'
+    else:
+        trades_zip_path = f'{base_path}/trades-{start_date}-{end_date}-{dollar_threshold_str}.zip'
+        bar_zip_path = f'{base_path}/bars-{start_date}-{end_date}-{dollar_threshold_str}.zip'
+    
+
     plot_save_dir = '/Users/aming/project/python/crypto-trade/strategy/fusion/pic'
     
     # 数据路径模板
@@ -47,6 +70,8 @@ def main():
             'date_range': (start_date, end_date),
             'data_path_template': data_path_template
         },
+        'bar_type': bar_type,           # 使用时间条
+        'time_interval': time_interval,        # 1小时间隔
         'dollar_threshold': dollar_threshold,
         'bar_zip_path': bar_zip_path,
         'feature_window_bars': 10,

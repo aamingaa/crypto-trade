@@ -221,3 +221,110 @@ class TradingVisualizer:
             print(f"收益率分布图已保存至: {save_path}")
         else:
             plt.show()
+
+    def plot_strategy_comprehensive(self,
+                                   price: pd.Series,
+                                   nav: pd.Series,
+                                   benchmark: Optional[pd.Series] = None,
+                                   buy_points: Optional[pd.DataFrame] = None,
+                                   sell_points: Optional[pd.DataFrame] = None,
+                                   title: str = "策略综合分析",
+                                   save_path: Optional[str] = None) -> None:
+        """
+        绘制策略收盘价走势、买卖点位、策略与市场累计收益对比（参考 MA_strategy_v2 风格）
+
+        参数说明：
+        - price: 收盘价时间序列（索引为时间）
+        - nav: 策略净值（初始=1.0）
+        - benchmark: 基准净值（初始=1.0），可选
+        - buy_points: 可选，包含列 ['time', 'price'] 的 DataFrame
+        - sell_points: 可选，包含列 ['time', 'price'] 的 DataFrame
+        - title: 图标题
+        - save_path: 图片保存路径
+        """
+        if price is None or len(price) == 0 or nav is None or len(nav) == 0:
+            print("缺少必要的数据用于绘图（price/nav）")
+            return
+        
+        # 统一索引
+        if not isinstance(price.index, pd.DatetimeIndex):
+            price.index = pd.to_datetime(price.index)
+        if not isinstance(nav.index, pd.DatetimeIndex):
+            nav.index = pd.to_datetime(nav.index)
+        if benchmark is not None and not isinstance(benchmark.index, pd.DatetimeIndex):
+            benchmark.index = pd.to_datetime(benchmark.index)
+
+        common_idx = price.index.intersection(nav.index)
+        if benchmark is not None:
+            common_idx = common_idx.intersection(benchmark.index)
+        price = price.loc[common_idx]
+        nav = nav.loc[common_idx]
+        if benchmark is not None:
+            benchmark = benchmark.loc[common_idx]
+
+        fig = plt.figure(figsize=(18, 12))
+        gs = fig.add_gridspec(3, 1, hspace=0.28, height_ratios=[2, 1.6, 1.4])
+
+        # 1) 价格与买卖点
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax1.plot(price.index, price.values, color="#2E86C1", lw=1.6, label="收盘价")
+        
+        # 买卖点标注
+        def _scatter_points(points: Optional[pd.DataFrame], marker: str, color: str, label: str):
+            if points is not None and len(points) > 0:
+                pts = points.copy()
+                if 'time' in pts.columns:
+                    pts_time = pd.to_datetime(pts['time'])
+                else:
+                    pts_time = pts.index
+                pts_price = pts['price'] if 'price' in pts.columns else price.reindex(pts_time).values
+                ax1.scatter(pts_time, pts_price, marker=marker, s=90, zorder=5,
+                            color=color, edgecolors='black', linewidths=0.8, label=label)
+
+        _scatter_points(buy_points, marker='^', color='red', label='买入')
+        _scatter_points(sell_points, marker='v', color='green', label='卖出')
+
+        ax1.set_title('价格走势与买卖点', fontsize=14, fontweight='bold')
+        ax1.set_ylabel('价格', fontsize=11)
+        ax1.legend(loc='best', fontsize=10)
+        ax1.grid(alpha=0.3, linestyle='--')
+
+        # 2) 策略净值 vs 基准净值
+        ax2 = fig.add_subplot(gs[1, 0])
+        ax2.plot(nav.index, nav.values, color="#E74C3C", lw=1.8, label='策略净值')
+        if benchmark is not None:
+            ax2.plot(benchmark.index, benchmark.values, color="#95A5A6", lw=1.6, ls='--', label='基准净值')
+        ax2.axhline(1.0, color='black', ls=':', lw=1, alpha=0.5)
+        ax2.set_title('策略净值 vs 基准净值', fontsize=14, fontweight='bold')
+        ax2.set_ylabel('净值', fontsize=11)
+        ax2.legend(loc='best', fontsize=10)
+        ax2.grid(alpha=0.3, linestyle='--')
+
+        # 3) 累计收益对比（含超额收益）
+        ax3 = fig.add_subplot(gs[2, 0])
+        cum_ret_strategy = (nav - 1.0) * 100.0
+        ax3.plot(cum_ret_strategy.index, cum_ret_strategy.values, color="#E74C3C", lw=1.8, label='策略累计收益')
+        if benchmark is not None:
+            cum_ret_bench = (benchmark - 1.0) * 100.0
+            ax3.plot(cum_ret_bench.index, cum_ret_bench.values, color="#95A5A6", lw=1.6, ls='--', label='基准累计收益')
+            excess = cum_ret_strategy - cum_ret_bench
+            ax3_2 = ax3.twinx()
+            ax3_2.fill_between(excess.index, 0, excess.values, color="#3498DB", alpha=0.22, label='超额收益')
+            ax3_2.set_ylabel('超额收益(%)', color="#3498DB")
+            ax3_2.tick_params(axis='y', labelcolor="#3498DB")
+            ax3_2.legend(loc='upper right', fontsize=9)
+        ax3.axhline(0, color='black', ls=':', lw=1, alpha=0.5)
+        ax3.set_title('累计收益对比', fontsize=13, fontweight='bold')
+        ax3.set_xlabel('时间', fontsize=11)
+        ax3.set_ylabel('累计收益(%)', fontsize=11)
+        ax3.legend(loc='upper left', fontsize=9)
+        ax3.grid(alpha=0.3, linestyle='--')
+
+        fig.suptitle(title, fontsize=18, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            print(f"策略综合分析图已保存至: {save_path}")
+        else:
+            plt.show()

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from core.base import ConfigManager
 from data.trades_processor import TradesProcessor
 from data.dollar_bars import DollarBarBuilder
+from data.time_bars import TimeBarBuilder
 # from features import MicrostructureFeatureExtractor
 from features.microstructure_extractor import MicrostructureFeatureExtractor
 from ml.models import ModelFactory
@@ -83,15 +84,30 @@ class TradingPipeline:
         
         raise ValueError("必须提供trades_data、trades_zip_path或date_range+data_path_template")
     
-    def build_bars(self, trades_df: pd.DataFrame, dollar_threshold: float,
-                   bar_zip_path: Optional[str] = None) -> pd.DataFrame:
-        """构建Dollar Bars"""
+    def build_bars(self,
+                   trades_df: pd.DataFrame,
+                   dollar_threshold: float,
+                   bar_zip_path: Optional[str] = None,
+                   bar_type: str = 'dollar',
+                   time_freq: Optional[str] = None) -> pd.DataFrame:
+        """构建 Bars（支持 Dollar 和 Time）
+
+        参数
+        - bar_type: 'dollar' 或 'time'
+        - time_freq: 当 bar_type='time' 时的频率字符串（如 '1H', '15min'）
+        """
         if bar_zip_path and os.path.exists(bar_zip_path):
             print(f"从缓存加载bars: {bar_zip_path}")
             bars = pd.read_csv(bar_zip_path)
         else:
-            print("构建Dollar Bars...")
-            bar_builder = DollarBarBuilder(dollar_threshold)
+            if bar_type == 'time':
+                freq = time_freq or '1H'
+                print(f"构建Time Bars（freq={freq}）...")
+                bar_builder = TimeBarBuilder(freq=freq)
+            else:
+                print("构建Dollar Bars...")
+                bar_builder = DollarBarBuilder(dollar_threshold)
+
             bars = bar_builder.process(trades_df)
             
             if bar_zip_path:
@@ -252,9 +268,16 @@ class TradingPipeline:
         
         # 构建bars
         dollar_threshold = kwargs.get('dollar_threshold', 60000000)
-        bars = self.build_bars(trades_df, dollar_threshold, 
-                              kwargs.get('bar_zip_path'))
-        print(f"构建了{len(bars)}个Dollar Bars")
+        bar_type = kwargs.get('bar_type', 'dollar')
+        time_freq = kwargs.get('time_freq')
+        bars = self.build_bars(
+            trades_df,
+            dollar_threshold,
+            kwargs.get('bar_zip_path'),
+            bar_type=bar_type,
+            time_freq=time_freq,
+        )
+        print(f"构建了{len(bars)}个{('Time' if bar_type=='time' else 'Dollar')} Bars")
         
         # 提取特征
         feature_window_bars = kwargs.get('feature_window_bars', 10)
