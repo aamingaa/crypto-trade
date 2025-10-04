@@ -53,7 +53,7 @@ class TimeBarBuilder(BaseDataProcessor):
             'original_index': ['first', 'last']
         }
 
-        grouped = df.resample(freq, label='right', closed='right').agg(agg)
+        grouped = df.resample(freq, label='right', closed='left').agg(agg)
 
         if len(grouped) == 0:
             return pd.DataFrame(columns=[
@@ -71,28 +71,133 @@ class TimeBarBuilder(BaseDataProcessor):
         ]
 
         # 交易笔数（每个时间桶内的逐笔条数）
-        trade_counts = df['price'].resample(freq, label='right', closed='right').count().rename('trades')
+        trade_counts = df['price'].resample(freq, label='right', closed='left').count().rename('trades')
         bars = grouped.join(trade_counts)
 
         # 丢弃空桶
         bars = bars[bars['trades'] > 0]
 
         # 使用桶的右端点作为 end_time，左端点作为 start_time
-        try:
-            offset = pd.tseries.frequencies.to_offset(freq)
-        except Exception:
-            offset = pd.tseries.frequencies.to_offset(pd.tseries.frequencies.to_offset(freq))
+        offset = pd.tseries.frequencies.to_offset(freq)
         bars['end_time'] = bars.index
         bars['start_time'] = bars['end_time'] - offset
 
-        # 重置 bar_id，连续整数
+        # 添加逐笔交易级别的累计前缀和数据
+        self._add_trade_level_cumulative_data(bars, df)
+        
+        # 重置 bar_id 为连续整数
         bars = bars.reset_index(drop=True)
         bars['bar_id'] = bars.index
+        
+        # 添加大单统计
+        bars = self._add_large_order_stats(df, bars)
 
         # 与 DollarBarBuilder 保持一致的技术指标和累计列
         bars = self._add_technical_indicators(bars)
 
         return bars
+    
+    def _add_trade_level_cumulative_data(self, bars: pd.DataFrame, df: pd.DataFrame):
+        """添加逐笔交易级别的累计前缀和数据"""
+        # 提取数组用于向量化计算
+        prices = df['price'].to_numpy(dtype=float)
+        qtys = df['qty'].to_numpy(dtype=float) 
+        quotes = df['quote_qty'].to_numpy(dtype=float)
+        signs = np.where(df['is_buyer_maker'].to_numpy(), -1.0, 1.0)
+        
+        # 计算累计前缀和
+        csum_qty = np.cumsum(qtys)
+        csum_signed_qty = np.cumsum(signs * qtys)
+        csum_quote = np.cumsum(quotes)
+        csum_signed_quote = np.cumsum(signs * quotes)
+        csum_pxqty = np.cumsum(prices * qtys)
+        
+        # 波动相关的累计数据
+        logp = np.log(prices)
+        r = np.diff(logp)
+        ret2 = np.r_[0.0, r * r]
+        abs_r = np.r_[0.0, np.abs(r)]
+        # Bipower variation: |r_t||r_{t-1}|
+        bp_core = np.r_[0.0, np.r_[0.0, abs_r[1:] * abs_r[:-1]]]
+        
+        csum_ret2 = np.cumsum(ret2)
+        csum_abs_r = np.cumsum(abs_r)
+        csum_bpv = np.cumsum(bp_core)
+        
+        # 将累计数据映射到每个bar的结束位置
+        end_idx = bars['end_trade_idx'].to_numpy(dtype=int)
+        bars['cs_qty'] = csum_qty[end_idx]
+        bars['cs_quote'] = csum_quote[end_idx]
+        bars['cs_signed_qty'] = csum_signed_qty[end_idx]
+        bars['cs_signed_quote'] = csum_signed_quote[end_idx]
+        bars['cs_pxqty'] = csum_pxqty[end_idx]
+        bars['cs_ret2'] = csum_ret2[end_idx]
+        bars['cs_abs_r'] = csum_abs_r[end_idx]
+        bars['cs_bpv'] = csum_bpv[end_idx]
+    
+    def _add_large_order_stats(self, df: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+        """添加大单统计"""
+        # 首先需要为 df 添加 bar_id 以便分组
+        # 使用 bars 的时间边界为每条交易分配 bar_id
+        df_with_bar = self._assign_bar_ids_to_trades(df, bars)
+        
+        abs_thresholds = [100.0, 1000.0, 10000.0, 100000.0]
+        bar_ids_arr = df_with_bar['bar_id'].to_numpy(dtype=np.int64)
+        quote_arr = df_with_bar['quote_qty'].to_numpy(dtype=np.float64)
+        sign_arr = np.where(df_with_bar['trade_sign'].to_numpy() > 0, 1.0, -1.0)
+        n_bars = int(bars.index.max()) + 1 if len(bars.index) > 0 else 0
+        
+        for thr in abs_thresholds:
+            m = quote_arr >= thr
+            if n_bars == 0 or not np.any(m):
+                tag = f"abs_{int(thr)}"
+                self._add_zero_large_order_columns(bars, tag)
+                continue
+
+            # 计算大单统计
+            self._compute_large_order_stats(bars, bar_ids_arr, quote_arr, sign_arr, m, thr, n_bars)
+        
+        return bars
+    
+    def _assign_bar_ids_to_trades(self, df: pd.DataFrame, bars: pd.DataFrame) -> pd.DataFrame:
+        """为每条交易分配对应的 bar_id"""
+        df_copy = df.copy()
+        df_copy['bar_id'] = -1
+        
+        for idx, bar_row in bars.iterrows():
+            start_idx = int(bar_row['start_trade_idx'])
+            end_idx = int(bar_row['end_trade_idx'])
+            df_copy.loc[start_idx:end_idx, 'bar_id'] = idx
+        
+        return df_copy
+    
+    def _add_zero_large_order_columns(self, bars: pd.DataFrame, tag: str):
+        """添加零值大单列"""
+        columns = ['dollar_sum', 'count', 'buy_dollar', 'sell_dollar', 'buy_count', 'sell_count']
+        for col in columns:
+            bars[f'large_{tag}_{col}'] = 0.0
+    
+    def _compute_large_order_stats(self, bars: pd.DataFrame, bar_ids_arr: np.ndarray, 
+                                 quote_arr: np.ndarray, sign_arr: np.ndarray, 
+                                 mask: np.ndarray, threshold: float, n_bars: int):
+        """计算大单统计指标"""
+        dollar_sum = np.bincount(bar_ids_arr[mask], weights=quote_arr[mask], minlength=n_bars)
+        count_sum = np.bincount(bar_ids_arr[mask], minlength=n_bars)
+        
+        mb = mask & (sign_arr > 0)
+        ms = mask & (sign_arr < 0)
+        buy_dollar = np.bincount(bar_ids_arr[mb], weights=quote_arr[mb], minlength=n_bars)
+        sell_dollar = np.bincount(bar_ids_arr[ms], weights=quote_arr[ms], minlength=n_bars)
+        buy_count = np.bincount(bar_ids_arr[mb], minlength=n_bars)
+        sell_count = np.bincount(bar_ids_arr[ms], minlength=n_bars)
+
+        tag = f"abs_{int(threshold)}"
+        bars[f'large_{tag}_dollar_sum'] = dollar_sum.astype(float)
+        bars[f'large_{tag}_count'] = count_sum.astype(float)
+        bars[f'large_{tag}_buy_dollar'] = buy_dollar.astype(float)
+        bars[f'large_{tag}_sell_dollar'] = sell_dollar.astype(float)
+        bars[f'large_{tag}_buy_count'] = buy_count.astype(float)
+        bars[f'large_{tag}_sell_count'] = sell_count.astype(float)
 
     def _add_technical_indicators(self, bars: pd.DataFrame) -> pd.DataFrame:
         """复用与 DollarBarBuilder 基本一致的技术指标计算"""
@@ -150,13 +255,24 @@ class TimeBarBuilder(BaseDataProcessor):
         return bars
 
     def _add_cumulative_columns(self, bars: pd.DataFrame):
+        """添加累计列"""
         cs_cols = [
             'bar_logret', 'bar_abs_logret', 'bar_logret2', 'bar_logret4',
             'bar_tr', 'bar_log_hl', 'bar_parkinson_var', 'bar_gk_var', 'bar_rs_var',
             'bar_duration_s', 'dollar_value', 'volume', 'trades'
         ]
+        
         for col in cs_cols:
             if col in bars.columns:
                 bars[f'cs_{col}'] = bars[col].fillna(0.0).cumsum()
+        
+        # 为大单列添加累计前缀和
+        abs_thresholds = [100.0, 1000.0, 10000.0, 100000.0]
+        for thr in abs_thresholds:
+            tag = f"abs_{int(thr)}"
+            for col in ['dollar_sum', 'count', 'buy_dollar', 'sell_dollar', 'buy_count', 'sell_count']:
+                colname = f'large_{tag}_{col}'
+                if colname in bars.columns:
+                    bars[f'cs_{colname}'] = bars[colname].cumsum()
 
 
